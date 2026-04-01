@@ -10,6 +10,7 @@ import { runInvestigate } from "./agents/investigator.js";
 import { runFlows } from "./agents/flow-tracer.js";
 import { runKnowledge } from "./commands/knowledge.js";
 import { setLogLevel } from "./utils/logger.js";
+import { setBackend, type Backend } from "./claude/client.js";
 
 const program = new Command();
 
@@ -18,7 +19,18 @@ program
   .description(
     "Self-learning knowledge tool with multi-agent fact-checking"
   )
-  .version("0.2.0");
+  .version("0.3.0")
+  .option(
+    "--backend <type>",
+    "AI backend: claude-code (default, no API key) or api",
+    "claude-code"
+  )
+  .hook("preAction", (thisCommand) => {
+    const opts = thisCommand.opts();
+    if (opts.backend) {
+      setBackend(opts.backend as Backend);
+    }
+  });
 
 // === Core Commands ===
 

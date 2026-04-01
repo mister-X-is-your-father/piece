@@ -1,82 +1,29 @@
-import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
 import pLimit from "p-limit";
 import { logger } from "../utils/logger.js";
+import { generateId } from "../knowledge/db.js";
 
-let client: Anthropic | null = null;
+const execFileAsync = promisify(execFile);
 
-/**
- * Load .env file and inject into process.env.
- * Supports ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN.
- */
-function loadEnvFile(): void {
-  const paths = [
-    join(process.cwd(), ".env"),
-    join(process.env.HOME || "", ".env"),
-  ];
+// --- Backend Selection ---
 
-  for (const envPath of paths) {
-    try {
-      const content = readFileSync(envPath, "utf-8");
-      for (const line of content.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const eqIdx = trimmed.indexOf("=");
-        if (eqIdx === -1) continue;
-        const key = trimmed.slice(0, eqIdx).trim();
-        const value = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
-        if (!process.env[key]) {
-          process.env[key] = value;
-        }
-      }
-    } catch {
-      // File not found, skip
-    }
-  }
+export type Backend = "claude-code" | "api";
+
+let currentBackend: Backend = "claude-code"; // default: Claude Code CLI
+
+export function setBackend(backend: Backend): void {
+  currentBackend = backend;
 }
 
-/**
- * Get Anthropic client with support for multiple auth methods:
- *
- * 1. ANTHROPIC_API_KEY env var — standard API key (sk-ant-...)
- * 2. ANTHROPIC_AUTH_TOKEN env var — Bearer token for Max/定額課金 plans
- * 3. .env file in CWD or home directory
- *
- * Max mode (定額課金) uses authToken (Bearer) authentication.
- * Standard API uses apiKey (X-Api-Key) authentication.
- */
-export function getClient(): Anthropic {
-  if (!client) {
-    // Load .env file first
-    loadEnvFile();
-
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
-
-    if (!apiKey && !authToken) {
-      console.error(
-        `Error: No Anthropic credentials found.\n\n` +
-        `Set one of the following:\n` +
-        `  export ANTHROPIC_API_KEY="sk-ant-..."     # Standard API\n` +
-        `  export ANTHROPIC_AUTH_TOKEN="..."          # Max/定額課金プラン\n\n` +
-        `Or add to .env file in project root or home directory.`
-      );
-      process.exit(1);
-    }
-
-    if (authToken) {
-      logger.info("Using auth token (Max/定額課金 mode)");
-      client = new Anthropic({
-        authToken,
-        apiKey: undefined,
-      });
-    } else {
-      client = new Anthropic({ apiKey });
-    }
-  }
-  return client;
+export function getBackend(): Backend {
+  return currentBackend;
 }
+
+// --- Types ---
 
 export interface AgentRequest {
   model: string;
@@ -91,10 +38,90 @@ export interface AgentResponse {
   outputTokens: number;
 }
 
-export async function callAgent(req: AgentRequest): Promise<AgentResponse> {
-  const anthropic = getClient();
+// --- Claude Code Backend (default, no API key needed) ---
 
-  const response = await anthropic.messages.create({
+interface ClaudeCliResult {
+  type: string;
+  subtype: string;
+  is_error: boolean;
+  result: string;
+  duration_ms: number;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  };
+  modelUsage?: Record<string, { inputTokens: number; outputTokens: number }>;
+}
+
+async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
+  // Build the full prompt with system prompt embedded
+  const fullPrompt = `${req.systemPrompt}\n\n---\n\n${req.userPrompt}`;
+
+  // Write prompt to temp file to avoid arg length limits
+  const tmpFile = join(tmpdir(), `scribe-prompt-${generateId()}.txt`);
+  writeFileSync(tmpFile, fullPrompt, "utf-8");
+
+  try {
+    const { stdout } = await execFileAsync(
+      "claude",
+      [
+        "-p", fullPrompt,
+        "--output-format", "json",
+        "--max-turns", "1",
+        "--no-input",
+      ],
+      {
+        maxBuffer: 10 * 1024 * 1024, // 10MB
+        timeout: 300_000, // 5 minutes
+        env: { ...process.env },
+      }
+    );
+
+    const parsed = JSON.parse(stdout) as ClaudeCliResult;
+
+    if (parsed.is_error) {
+      throw new Error(`Claude Code error: ${parsed.result}`);
+    }
+
+    // Extract token usage from modelUsage
+    let inputTokens = 0;
+    let outputTokens = 0;
+    if (parsed.modelUsage) {
+      for (const usage of Object.values(parsed.modelUsage)) {
+        inputTokens += usage.inputTokens || 0;
+        outputTokens += usage.outputTokens || 0;
+      }
+    }
+
+    return {
+      content: parsed.result,
+      inputTokens,
+      outputTokens,
+    };
+  } finally {
+    try { unlinkSync(tmpFile); } catch { /* ignore */ }
+  }
+}
+
+// --- Direct API Backend (fallback if API key is set) ---
+
+async function callViaApi(req: AgentRequest): Promise<AgentResponse> {
+  // Lazy import to avoid requiring @anthropic-ai/sdk when not used
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
+
+  let client: InstanceType<typeof Anthropic>;
+  if (authToken) {
+    client = new Anthropic({ authToken, apiKey: undefined });
+  } else if (apiKey) {
+    client = new Anthropic({ apiKey });
+  } else {
+    throw new Error("No API credentials for direct API mode");
+  }
+
+  const response = await client.messages.create({
     model: req.model,
     max_tokens: req.maxTokens ?? 8192,
     system: req.systemPrompt,
@@ -111,6 +138,15 @@ export async function callAgent(req: AgentRequest): Promise<AgentResponse> {
   };
 }
 
+// --- Unified Call Interface ---
+
+export async function callAgent(req: AgentRequest): Promise<AgentResponse> {
+  if (currentBackend === "claude-code") {
+    return callViaClaudeCode(req);
+  }
+  return callViaApi(req);
+}
+
 export function createLimiter(concurrency: number) {
   return pLimit(concurrency);
 }
@@ -124,7 +160,8 @@ export async function callAgentWithRetry(
       return await callAgent(req);
     } catch (err: unknown) {
       const isRateLimit =
-        err instanceof Error && err.message.includes("429");
+        err instanceof Error &&
+        (err.message.includes("429") || err.message.includes("rate"));
       if (isRateLimit && attempt < maxRetries - 1) {
         const delay = Math.pow(2, attempt) * 1000;
         logger.warn(`Rate limited, retrying in ${delay}ms...`);

@@ -4,6 +4,15 @@ import { mkdirSync } from "node:fs";
 import { logger } from "../utils/logger.js";
 
 let db: Database.Database | null = null;
+let _needsSeed = false;
+
+export function needsConceptSeed(): boolean {
+  if (_needsSeed) {
+    _needsSeed = false;
+    return true;
+  }
+  return false;
+}
 
 const MIGRATIONS = [
   {
@@ -190,6 +199,48 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 2,
+    sql: `
+      -- N-gram token index (replaces FTS5 for search)
+      CREATE TABLE node_tokens (
+        node_id   TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+        token     TEXT NOT NULL,
+        field     TEXT NOT NULL CHECK(field IN ('summary', 'content', 'tag')),
+        frequency INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY(node_id, token, field)
+      );
+      CREATE INDEX idx_node_tokens_token ON node_tokens(token);
+      CREATE INDEX idx_node_tokens_node  ON node_tokens(node_id);
+
+      -- Concept mesh (synonym/cross-language expansion)
+      CREATE TABLE concept_links (
+        id        TEXT PRIMARY KEY,
+        term_a    TEXT NOT NULL,
+        term_b    TEXT NOT NULL,
+        weight    REAL NOT NULL DEFAULT 1.0,
+        source    TEXT NOT NULL CHECK(source IN ('manual', 'co_occurrence', 'extraction')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(term_a, term_b)
+      );
+      CREATE INDEX idx_concept_links_a ON concept_links(term_a);
+      CREATE INDEX idx_concept_links_b ON concept_links(term_b);
+
+      -- Hebbian weight on node_links
+      ALTER TABLE node_links ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;
+      ALTER TABLE node_links ADD COLUMN last_co_activated_at TEXT;
+      ALTER TABLE node_links ADD COLUMN co_activation_count INTEGER NOT NULL DEFAULT 0;
+
+      -- Co-access log (for Hebbian learning)
+      CREATE TABLE co_access_log (
+        id         TEXT PRIMARY KEY,
+        query_text TEXT NOT NULL,
+        node_ids   TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {
@@ -202,7 +253,15 @@ export function getKnowledgeDB(scribePath: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
 
-  runMigrations(db);
+  const migrationsRun = runMigrations(db);
+  if (migrationsRun.includes(2)) {
+    // Seed concept links synchronously after v2 migration
+    // Dynamic import is async, so we seed lazily on first search instead
+    db.prepare(
+      "INSERT OR IGNORE INTO concept_links (id, term_a, term_b, weight, source) VALUES (?, ?, ?, 1.0, 'manual')"
+    ); // just ensure table exists
+    _needsSeed = true;
+  }
   return db;
 }
 
@@ -213,7 +272,8 @@ export function closeKnowledgeDB(): void {
   }
 }
 
-function runMigrations(database: Database.Database): void {
+function runMigrations(database: Database.Database): number[] {
+  const applied: number[] = [];
   // Check if _migrations table exists
   const tableExists = database
     .prepare(
@@ -233,6 +293,7 @@ function runMigrations(database: Database.Database): void {
     if (migration.version > currentVersion) {
       logger.debug(`Running migration v${migration.version}...`);
       database.exec(migration.sql);
+      applied.push(migration.version);
 
       // Record migration (table is created in migration 1)
       if (migration.version >= 1) {
@@ -244,6 +305,7 @@ function runMigrations(database: Database.Database): void {
       logger.debug(`Migration v${migration.version} applied`);
     }
   }
+  return applied;
 }
 
 export function generateId(): string {

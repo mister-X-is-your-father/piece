@@ -1,5 +1,21 @@
 import type Database from "better-sqlite3";
 import { getKnowledgeDB, generateId } from "./db.js";
+import {
+  synapseSearch,
+  indexNodeTokens,
+  hebbianUpdate,
+  reindexAllNodes,
+} from "./synapse.js";
+import { tokenize, tokenizeQuery } from "./tokenizer.js";
+
+// Sync wrapper for tokenizeQuery (no async needed)
+function await_free_tokenizeQuery(text: string) {
+  return tokenizeQuery(text);
+}
+
+function tokenize_simple(text: string): string[] {
+  return tokenize(text).map((t) => t.token);
+}
 import type {
   KnowledgeNode,
   KnowledgeNodeInsert,
@@ -49,6 +65,9 @@ export class KnowledgeStore {
       }
     }
 
+    // Index tokens for synapse search
+    indexNodeTokens(this.db, id, input.content, input.summary, tags);
+
     return this.getNode(id)!;
   }
 
@@ -89,76 +108,70 @@ export class KnowledgeStore {
     return row.count;
   }
 
-  // --- Full-Text Search ---
+  // --- Synapse Search (brain-inspired, replaces FTS5) ---
 
   searchNodes(query: string, limit: number = 10): KnowledgeSearchResult[] {
-    const rows = this.db
-      .prepare(
-        `SELECT kn.*, rank
-         FROM knowledge_nodes_fts fts
-         JOIN knowledge_nodes kn ON kn.rowid = fts.rowid
-         WHERE knowledge_nodes_fts MATCH ?
-         ORDER BY rank
-         LIMIT ?`
-      )
-      .all(query, limit) as (KnowledgeNode & { rank: number })[];
+    const activated = synapseSearch(this.db, query, { limit });
 
-    return rows.map((row) => {
-      const citations = this.getCitationsForNode(row.id);
-      return {
-        node: row,
-        relevance: -row.rank, // FTS5 rank is negative, lower is better
-        citations,
-      };
-    });
+    return activated
+      .map((a) => {
+        const node = this.getNode(a.nodeId);
+        if (!node) return null;
+        const citations = this.getCitationsForNode(a.nodeId);
+        return {
+          node,
+          relevance: a.activation,
+          citations,
+        };
+      })
+      .filter((r): r is KnowledgeSearchResult => r !== null);
   }
 
   /**
-   * Search for answer-worthy knowledge.
-   * Combines FTS relevance with confidence and access frequency.
+   * Search for answer-worthy knowledge using spreading activation.
+   * Combines synapse activation with confidence and access frequency.
    */
   searchForAnswer(
     question: string,
     limit: number = 10
   ): KnowledgeSearchResult[] {
-    // Tokenize for FTS5 OR query
-    const tokens = question
-      .split(/[\s、。？！?!,.;:]+/)
-      .filter((t) => t.length > 1)
-      .map((t) => `"${t}"`)
-      .join(" OR ");
+    const activated = synapseSearch(this.db, question, {
+      limit: limit * 2, // get more candidates for scoring
+      conceptExpansion: true,
+      maxDepth: 2,
+    });
 
-    if (!tokens) return [];
-
-    try {
-      const rows = this.db
-        .prepare(
-          `SELECT kn.*,
-                  rank,
-                  (kn.confidence * 10 + kn.access_count * 0.5 + (-rank) * 2) as score
-           FROM knowledge_nodes_fts fts
-           JOIN knowledge_nodes kn ON kn.rowid = fts.rowid
-           WHERE knowledge_nodes_fts MATCH ?
-           ORDER BY score DESC
-           LIMIT ?`
-        )
-        .all(tokens, limit) as (KnowledgeNode & {
-        rank: number;
-        score: number;
-      })[];
-
-      return rows.map((row) => {
-        const citations = this.getCitationsForNode(row.id);
+    return activated
+      .map((a) => {
+        const node = this.getNode(a.nodeId);
+        if (!node) return null;
+        const citations = this.getCitationsForNode(a.nodeId);
+        // Combined score: synapse activation + confidence + access frequency
+        const combinedScore =
+          a.activation * 2 + node.confidence * 10 + node.access_count * 0.5;
         return {
-          node: row,
-          relevance: row.score,
+          node,
+          relevance: combinedScore,
           citations,
         };
-      });
-    } catch {
-      // FTS query syntax error
-      return [];
-    }
+      })
+      .filter((r): r is KnowledgeSearchResult => r !== null)
+      .sort((a, b) => b.relevance - a.relevance)
+      .slice(0, limit);
+  }
+
+  /**
+   * Record co-access of nodes (triggers Hebbian learning).
+   */
+  recordCoAccess(nodeIds: string[]): void {
+    hebbianUpdate(this.db, nodeIds);
+  }
+
+  /**
+   * Reindex all node tokens (for migration or repair).
+   */
+  reindexAll(): number {
+    return reindexAllNodes(this.db);
   }
 
   // --- Citations ---
@@ -257,39 +270,58 @@ export class KnowledgeStore {
   // --- Query Cache ---
 
   findSimilarQuery(question: string): QueryCache | null {
-    const tokens = question
-      .split(/[\s、。？！?!,.;:]+/)
-      .filter((t) => t.length > 1)
-      .map((t) => `"${t}"`)
-      .join(" OR ");
+    // Use n-gram tokenizer for query cache matching too
+    const { tokens } = await_free_tokenizeQuery(question);
+    if (tokens.length === 0) return null;
 
-    if (!tokens) return null;
+    // Search query_cache by normalized question similarity
+    const normalized = question.toLowerCase().replace(/[？！?!。、,.]/g, "").trim();
 
-    try {
-      const row = this.db
-        .prepare(
-          `SELECT qc.*
-           FROM query_cache_fts fts
-           JOIN query_cache qc ON qc.rowid = fts.rowid
-           WHERE query_cache_fts MATCH ?
-           ORDER BY rank
-           LIMIT 1`
-        )
-        .get(tokens) as QueryCache | undefined;
+    // Try exact normalized match first
+    let row = this.db
+      .prepare("SELECT * FROM query_cache WHERE question_normalized = ? LIMIT 1")
+      .get(normalized) as QueryCache | undefined;
 
-      if (row) {
-        // Increment hit count
-        this.db
-          .prepare(
-            "UPDATE query_cache SET hit_count = hit_count + 1, last_hit_at = datetime('now') WHERE id = ?"
-          )
-          .run(row.id);
+    // Fallback: token overlap scoring against all cached queries
+    if (!row) {
+      const allCached = this.db
+        .prepare("SELECT * FROM query_cache ORDER BY hit_count DESC LIMIT 100")
+        .all() as QueryCache[];
+
+      const queryTokenSet = new Set(tokens.map((t) => t.token));
+      let bestScore = 0;
+      let bestRow: QueryCache | undefined;
+
+      for (const cached of allCached) {
+        const cachedTokens = new Set(
+          tokenize_simple(cached.question_normalized)
+        );
+        // Jaccard similarity
+        let intersection = 0;
+        for (const t of queryTokenSet) {
+          if (cachedTokens.has(t)) intersection++;
+        }
+        const union = queryTokenSet.size + cachedTokens.size - intersection;
+        const score = union > 0 ? intersection / union : 0;
+
+        if (score > bestScore && score >= 0.6) {
+          // 60% overlap threshold
+          bestScore = score;
+          bestRow = cached;
+        }
       }
-
-      return row ?? null;
-    } catch {
-      return null;
+      row = bestRow;
     }
+
+    if (row) {
+      this.db
+        .prepare(
+          "UPDATE query_cache SET hit_count = hit_count + 1, last_hit_at = datetime('now') WHERE id = ?"
+        )
+        .run(row.id);
+    }
+
+    return row ?? null;
   }
 
   cacheQuery(input: QueryCacheInsert): QueryCache {

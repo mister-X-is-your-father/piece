@@ -137,6 +137,27 @@ program
     await runKnowledge(path, options);
   });
 
+program
+  .command("reindex")
+  .description("Rebuild SQLite index from vault markdown files")
+  .argument("<path>", "Path to the project")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    const { resolve } = await import("node:path");
+    const { loadConfig } = await import("./config/loader.js");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { fullReindex } = await import("./knowledge/vault-primary.js");
+    const rootPath = resolve(path);
+    const config = await loadConfig(rootPath);
+    const scribePath = resolve(rootPath, config.output.directory);
+    const vaultPath = resolve(scribePath, "vault");
+    const db = getKnowledgeDB(scribePath);
+    const count = await fullReindex(db, vaultPath);
+    console.log(`Reindexed ${count} files from ${vaultPath}`);
+    closeKnowledgeDB();
+  });
+
 // === Obsidian Vault Integration ===
 
 const vault = program.command("vault").description("Obsidian vault integration");

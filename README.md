@@ -65,7 +65,7 @@ PIECEは違う:
 知識は **Markdown** (source of truth) + **SQLite** (検索インデックス) の二層構造。
 
 ```
-.scribe/vault/                  ← Obsidianで開ける
+.scribe/vault/                  ← Obsidianで開ける。人間もAIも直接読める
   ├── MOC.md                    ← 知識の地図
   ├── src-auth/
   │   ├── JWT認証の仕組み.md     ← [[リンク]]で繋がる
@@ -73,35 +73,58 @@ PIECEは違う:
   └── daily/
       └── 2026-04-01.md         ← その日の学習ログ
 
-.scribe/knowledge.db            ← 検索インデックス（再構築可能）
+.scribe/knowledge.db            ← 検索インデックス（消しても再構築可能）
 ```
+
+### なぜ二層構造なのか
+
+Markdownだけでも基本的な知識管理はできる。grepで検索し、`[[リンク]]`で繋ぎ、Gitで履歴を追える。知識が100ノード程度ならそれで十分。
+
+SQLiteが必要になるのは以下の場面:
+
+| 場面 | Markdownだけ | SQLite併用 |
+|------|-------------|-----------|
+| 「認証」で検索 | grep → ヒットする | 同じ |
+| 「セキュリティ」で検索 | grep → **ヒットしない**（「認証」としか書いてない） | concept展開 → 「認証」にも**ヒットする** |
+| よく一緒に使う知識の優先 | 判断できない | ヘッブ学習でweight上昇 → 上位に出る |
+| 「何を知らないか」の追跡 | 人間が目視で判断 | MECEセルのクエリ → 自動でmystery生成 |
+| 10,000ノードから検索 | grepが遅くなる | インデックスで一定速度 |
+| confidence 0.8以上だけ | 全ファイル読む | `WHERE confidence > 0.8` 一瞬 |
+| 類似質問のキャッシュ | ファイル名で部分一致？ | Jaccard類似度60%以上でHIT |
+
+**まとめると:**
+- **Markdown** = 書く・読む・見る・共有する層。人間にもAIにもアクセスしやすい
+- **SQLite** = 検索・学習・計算する層。知識が増えるほど価値が出る
+- SQLiteが消えても `piece reindex` で全Markdownから再構築できる。5秒で復活する
+
+小さく始めてMarkdownだけで運用し、知識が増えてきたらSQLiteの恩恵を受ける設計になっている。
 
 ### Neuron Search Engine
 
-脳科学にインスパイアされた検索エンジン:
+脳科学にインスパイアされた検索エンジン（SQLite層）:
 
-- **N-gram Tokenizer** — 日本語(bigram/trigram) + 英語(word-level)
-- **Concept Mesh** — 日英クロス言語の類義語ネットワーク（自動成長）
-- **Spreading Activation** — リンクを辿って関連知識を活性化
-- **Hebbian Learning** — 一緒に使われた知識同士のリンクが強化
+- **N-gram Tokenizer** — 日本語(bigram/trigram) + 英語(word-level)。FTS5のUnicode61トークナイザーでは日本語が全くヒットしなかった問題を解決
+- **Concept Mesh** — 日英クロス言語の類義語ネットワーク。「セキュリティ」→「auth」→「認証」のように概念を展開。初期69ペアの手動シード + 使うたびにco-occurrenceで自動成長
+- **Spreading Activation** — 直接マッチしなくても、リンクを辿って関連知識を活性化。複数の弱い信号が束になると強い活性化になる（脳のシナプス伝達と同じ原理）
+- **Hebbian Learning** — 「一緒に使われたニューロンは繋がりが強くなる」。同じ回答に使われた知識ノード同士のリンクweightが+0.1（上限5.0）。7日以上使われないリンクは徐々に減衰（下限0.1）
 
 ### Multi-Strategy Search
 
-5つの検索戦略を並行実行して統合:
+5つの検索戦略を並行実行し、結果を統合する。各戦略が異なる軸で知識空間をカバーするため、1つの戦略では見つからない知識も別の戦略で拾える。
 
-| Strategy | Weight | Method |
-|----------|--------|--------|
-| Neuron | 1.0 | N-gram + concept展開 + 拡散活性化 |
-| Structural | 0.8 | ファイルパス・関数名で逆引き |
-| Temporal | 0.4 | 最近アクセスされた知識を優先 |
-| Graph Walk | 0.6 | ヒットしたノードの隣接を探索 |
-| Tag Cluster | 0.7 | タグ集合のJaccard類似度 |
+| Strategy | Weight | Method | カバーする軸 |
+|----------|--------|--------|------------|
+| Neuron | 1.0 | N-gram + concept展開 + 拡散活性化 | 意味的一致 |
+| Structural | 0.8 | ファイルパス・関数名で逆引き | 構造的一致 |
+| Temporal | 0.4 | 最近アクセスされた知識を優先 | 文脈的一致 |
+| Graph Walk | 0.6 | ヒットしたノードの隣接を探索 | 関係的一致 |
+| Tag Cluster | 0.7 | タグ集合のJaccard類似度 | 分類的一致 |
 
-複数戦略でヒットしたノードにクロスボーナス（最大1.4倍）。
+複数戦略でヒットしたノードにクロスボーナス（2戦略で1.2倍、3戦略で1.4倍）。`createStrategy()`で独自戦略をプラグイン追加可能。
 
 ### MECE Matrix
 
-組み合わせテーブルで知識の漏れを検出:
+組み合わせテーブルで知識の漏れを検出する。対象（関数・モジュール・フロー）× 観点（正常系・異常系・境界値...）の全セルを列挙し、未調査のセルを可視化する。
 
 ```
 handleLogin     │ 正常系 │ 異常系 │ 境界値 │
@@ -111,8 +134,10 @@ handleLogin     │ 正常系 │ 異常系 │ 境界値 │
 戻り値          │  ✅   │  ✅   │  ❌   │
 エラーハンドリング │  ❌   │  ❌   │  ❌   │
 
-→ ❌ = 自動でmysteryに登録 → investigateで埋める
+→ ❌ = 自動でmysteryに登録 → investigateで埋めていく
 ```
+
+5種のビルトインテンプレート（function, module, flow, security, data lifecycle）+ カスタムテンプレート対応。
 
 ## Growth Cycle
 

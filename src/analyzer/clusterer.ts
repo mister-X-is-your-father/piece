@@ -5,8 +5,62 @@ import { logger } from "../utils/logger.js";
 
 /**
  * Groups files into functional clusters for Specialist assignment.
- * Strategy: directory-based grouping + dependency-based merging.
+ *
+ * Strategy priority:
+ * 1. Feature-based (from app-map): ビジネスドメイン単位（認証、freee連携、etc.）
+ * 2. Directory-based (fallback): ディレクトリ構造単位
+ *
+ * Feature-based clustering produces specialists like:
+ *   "認証・ログイン specialist" instead of "src-auth specialist"
  */
+/**
+ * Cluster from app-map features (business domain).
+ * Each feature becomes a specialist.
+ */
+export function clusterByFeatures(
+  files: FileEntry[],
+  featureFileMap: Map<string, { name: string; description: string; files: string[] }>,
+  config: ScribeConfig
+): Cluster[] {
+  const clusters: Cluster[] = [];
+  const assignedFiles = new Set<string>();
+
+  for (const [, feature] of featureFileMap) {
+    const featureFiles = feature.files.filter((f) =>
+      files.some((fe) => fe.relativePath === f)
+    );
+
+    if (featureFiles.length >= (config.clustering.minFilesPerSpecialist || 1)) {
+      clusters.push({
+        name: feature.name,
+        description: feature.description,
+        files: featureFiles,
+        keywords: [feature.name.toLowerCase()],
+        dependencies: [],
+      });
+      for (const f of featureFiles) assignedFiles.add(f);
+    }
+  }
+
+  // Unassigned files go to "_other" cluster
+  const unassigned = files
+    .filter((f) => f.category === "source" && !assignedFiles.has(f.relativePath))
+    .map((f) => f.relativePath);
+
+  if (unassigned.length > 0) {
+    clusters.push({
+      name: "_other",
+      description: "Unassigned files",
+      files: unassigned,
+      keywords: [],
+      dependencies: [],
+    });
+  }
+
+  logger.info(`Feature-based clustering: ${clusters.length} specialists`);
+  return clusters;
+}
+
 export function clusterFiles(
   files: FileEntry[],
   structures: FileStructure[],

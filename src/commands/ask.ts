@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import ora from "ora";
 import chalk from "chalk";
 import { loadConfig } from "../config/loader.js";
-import { orchestrateQuestion } from "../agents/orchestrator.js";
-import { factCheckAnswer, formatFactCheckReport } from "../agents/fact-checker.js";
+import { manageQuestion } from "../agents/manager.js";
+import { formatFactCheckReport } from "../agents/fact-checker.js";
 import { runSingleAgent, type AgentTask } from "../agents/agent-runner.js";
 import {
   KNOWLEDGE_EXTRACTOR_SYSTEM,
@@ -134,41 +134,35 @@ export async function runAsk(
       }
     }
 
-    // === Phase 1: Orchestrate (existing flow) ===
-    const spinner = ora("Consulting specialists...").start();
+    // === Phase 1: Manager delegates to domain specialists ===
+    const spinner = ora("Manager delegating to specialists...").start();
 
     let result;
     try {
-      result = await orchestrateQuestion(question, scribePath, config);
-      spinner.succeed(
-        `Consulted: ${result.specialistsConsulted.join(", ") || "none"}`
-      );
+      result = await manageQuestion(question, rootPath, scribePath, config);
+      const consultedDisplay = result.specialistsConsulted
+        .map((s) => `${s.name}(${s.role})`)
+        .join(", ");
+      spinner.succeed(`Consulted: ${consultedDisplay || "none"}`);
     } catch (err) {
       spinner.fail(`Query failed: ${err}`);
       throw err;
     }
 
-    // === Phase 2: Fact check (existing flow) ===
-    let factCheckReport;
-    if (!options.skipFactCheck && config.factCheck.enabled) {
-      const spinner2 = ora(
-        "Verifying answer against source code..."
-      ).start();
+    // Extract specialist names for backward compatibility
+    const consultedSpecialistNames = result.specialistsConsulted.map((s) => s.name);
 
-      try {
-        factCheckReport = await factCheckAnswer(
-          result.answer,
-          rootPath,
-          scribePath,
-          config
-        );
-        const { summary } = factCheckReport;
-        spinner2.succeed(
-          `Fact check: ${summary.verified} verified, ${summary.partial} partial, ${summary.unverified} unverified`
-        );
-      } catch (err) {
-        spinner2.warn(`Fact check encountered issues: ${err}`);
-      }
+    // === Phase 2: Fact check already done per-specialist by Manager ===
+    // Manager fact-checks each specialist response individually
+    const factCheckReport = result.factCheckResults.length > 0
+      ? result.factCheckResults[0].report // Use primary investigator's fact check
+      : undefined;
+
+    if (factCheckReport) {
+      const { summary } = factCheckReport;
+      console.log(
+        chalk.gray(`  Fact check: ${summary.verified} verified, ${summary.partial} partial, ${summary.unverified} unverified`)
+      );
     }
 
     // === Phase 3: Extract & save knowledge ===
@@ -180,7 +174,7 @@ export async function runAsk(
         nodesSaved = await extractAndSaveKnowledge(
           question,
           result.answer,
-          result.specialistsConsulted,
+          consultedSpecialistNames,
           knowledgeStore,
           config.knowledge.knowledgeExtractorModel,
           scribePath
@@ -194,11 +188,11 @@ export async function runAsk(
       knowledgeStore.cacheQuery({
         question,
         answer: result.answer,
-        specialists_consulted: result.specialistsConsulted,
+        specialists_consulted: consultedSpecialistNames,
         fact_check_summary: factCheckReport
           ? `${factCheckReport.summary.verified}v/${factCheckReport.summary.partial}p/${factCheckReport.summary.unverified}u`
           : null,
-        investigation_method: `orchestrator → ${result.specialistsConsulted.join(", ")}`,
+        investigation_method: `orchestrator → ${consultedSpecialistNames.join(", ")}`,
         knowledge_node_ids: [],
       });
     }
@@ -208,7 +202,7 @@ export async function runAsk(
     if (mysteryStore && config.knowledge.autoDetectMysteries) {
       mysteriesCreated = detectAndSaveMysteries(
         question,
-        result,
+        { answer: result.answer, specialistsConsulted: consultedSpecialistNames },
         factCheckReport,
         mysteryStore
       );
@@ -223,10 +217,10 @@ export async function runAsk(
       console.log(formatFactCheckReport(factCheckReport));
     }
 
-    if (result.specialistsConsulted.length > 0) {
+    if (consultedSpecialistNames.length > 0) {
       console.log(
         chalk.gray(
-          `\nSpecialists consulted: ${result.specialistsConsulted.join(", ")}`
+          `\nSpecialists consulted: ${consultedSpecialistNames.join(", ")}`
         )
       );
     }

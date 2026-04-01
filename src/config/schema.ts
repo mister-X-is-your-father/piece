@@ -45,12 +45,23 @@ export const FactCheckConfigSchema = z.object({
   verifyLineContent: z.boolean().default(true),
 });
 
+export const KnowledgeConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  investigationModel: z.string().default("claude-sonnet-4-20250514"),
+  flowTracerModel: z.string().default("claude-sonnet-4-20250514"),
+  knowledgeExtractorModel: z.string().default("claude-haiku-4-5-20251001"),
+  autoSaveKnowledge: z.boolean().default(true),
+  autoDetectMysteries: z.boolean().default(true),
+  knowledgeAnswerThreshold: z.number().default(0.7),
+});
+
 export const ScribeConfigSchema = z.object({
   target: TargetConfigSchema.default({}),
   agents: AgentsConfigSchema.default({}),
   clustering: ClusteringConfigSchema.default({}),
   output: OutputConfigSchema.default({}),
   factCheck: FactCheckConfigSchema.default({}),
+  knowledge: KnowledgeConfigSchema.default({}),
 });
 
 export type ScribeConfig = z.infer<typeof ScribeConfigSchema>;

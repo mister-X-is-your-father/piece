@@ -5,6 +5,10 @@ import { runAnalyze } from "./commands/analyze.js";
 import { runAsk } from "./commands/ask.js";
 import { runList } from "./commands/list.js";
 import { runUpdate } from "./commands/update.js";
+import { runMysteries } from "./commands/mysteries.js";
+import { runInvestigate } from "./agents/investigator.js";
+import { runFlows } from "./agents/flow-tracer.js";
+import { runKnowledge } from "./commands/knowledge.js";
 import { setLogLevel } from "./utils/logger.js";
 
 const program = new Command();
@@ -12,9 +16,11 @@ const program = new Command();
 program
   .name("codebase-scribe")
   .description(
-    "Reliable knowledge documentation tool with multi-agent fact-checking"
+    "Self-learning knowledge tool with multi-agent fact-checking"
   )
-  .version("0.1.0");
+  .version("0.2.0");
+
+// === Core Commands ===
 
 program
   .command("analyze")
@@ -31,15 +37,14 @@ program
 
 program
   .command("ask")
-  .description(
-    "Ask a question about an analyzed codebase (with fact-checking)"
-  )
+  .description("Ask a question (checks knowledge DB first, then AI)")
   .argument("<path>", "Path to the analyzed project")
   .argument("<question>", "Your question")
   .option("-c, --config <path>", "Path to config file")
   .option("-d, --docs <path>", "Path to .scribe directory")
   .option("--max-docs <n>", "Max docs in context", parseInt)
   .option("--skip-fact-check", "Skip fact checking step")
+  .option("--skip-knowledge", "Skip knowledge DB check/save")
   .option("-v, --verbose", "Verbose logging")
   .action(async (path: string, question: string, options) => {
     if (options.verbose) setLogLevel("debug");
@@ -65,6 +70,58 @@ program
   .action(async (path: string, options) => {
     if (options.verbose) setLogLevel("debug");
     await runUpdate(path, options);
+  });
+
+// === Knowledge Brain Commands ===
+
+program
+  .command("investigate")
+  .description("Autonomously investigate mysteries or explore topics")
+  .argument("<path>", "Path to the analyzed project")
+  .option("--mystery <id>", "Investigate a specific mystery")
+  .option("--explore <topic>", "Explore a topic proactively")
+  .option("--loop <n>", "Run N investigation cycles", parseInt)
+  .option("-v, --verbose", "Verbose logging")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runInvestigate(path, options);
+  });
+
+program
+  .command("mysteries")
+  .description("View and manage open mysteries (unknowns/gaps)")
+  .argument("<path>", "Path to the analyzed project")
+  .option("--all", "Include resolved mysteries")
+  .option("--specialist <name>", "Filter by specialist domain")
+  .option("--add <title>", "Manually add a mystery")
+  .option("--resolve <id>", "Mark a mystery as resolved")
+  .option("-v, --verbose", "Show detailed mystery info")
+  .action(async (path: string, options) => {
+    await runMysteries(path, options);
+  });
+
+program
+  .command("flows")
+  .description("Trace and view end-to-end feature flows")
+  .argument("<path>", "Path to the analyzed project")
+  .option("--trace <feature>", "Trace a new E2E flow")
+  .option("--show <id>", "Show a specific flow")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runFlows(path, options);
+  });
+
+program
+  .command("knowledge")
+  .description("Search, explore, and manage the knowledge base")
+  .argument("<path>", "Path to the analyzed project")
+  .option("--search <query>", "Search knowledge nodes")
+  .option("--graph", "Show knowledge connection graph")
+  .option("--specialist <name>", "Filter by specialist domain")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    await runKnowledge(path, options);
   });
 
 program.parse();

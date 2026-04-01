@@ -90,7 +90,10 @@ export async function runAsk(
         return;
       }
 
-      // Check knowledge DB for sufficient knowledge
+      // Prepare query vector for semantic search (async)
+      await knowledgeStore.prepareQueryVector(question);
+
+      // Check knowledge DB for sufficient knowledge (6 strategies)
       const knowledgeResults = knowledgeStore.searchForAnswer(question);
       const highConfidence = knowledgeResults.filter(
         (r) => r.node.confidence >= config.knowledge.knowledgeAnswerThreshold

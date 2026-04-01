@@ -252,6 +252,69 @@ const tagClusterStrategy: SearchStrategy = {
   },
 };
 
+/** 6. Vector: semantic similarity via embeddings */
+const vectorStrategy: SearchStrategy = {
+  name: "vector",
+  description: "Semantic similarity search via local embeddings (all-MiniLM-L6-v2)",
+  weight: 1.2, // highest weight — semantic understanding is powerful
+  search(db, query, limit) {
+    // Check if embeddings table has data
+    try {
+      const count = (
+        db.prepare("SELECT COUNT(*) as c FROM embeddings").get() as { c: number }
+      ).c;
+      if (count === 0) return [];
+    } catch {
+      return []; // table doesn't exist yet
+    }
+
+    // Synchronous vector search using pre-computed query embedding
+    // Note: The actual embedding is done async before calling multi-strategy
+    // Here we check if a cached query vector exists in a temp table
+    try {
+      const cached = db
+        .prepare("SELECT vector FROM _query_vector LIMIT 1")
+        .get() as { vector: Buffer } | undefined;
+      if (!cached) return [];
+
+      const queryVec = new Float32Array(
+        cached.vector.buffer,
+        cached.vector.byteOffset,
+        cached.vector.byteLength / 4
+      );
+
+      const rows = db
+        .prepare("SELECT node_id, vector FROM embeddings")
+        .all() as Array<{ node_id: string; vector: Buffer }>;
+
+      const results: StrategyResult[] = [];
+      for (const row of rows) {
+        const stored = new Float32Array(
+          row.vector.buffer,
+          row.vector.byteOffset,
+          row.vector.byteLength / 4
+        );
+        let dot = 0;
+        for (let i = 0; i < queryVec.length; i++) {
+          dot += queryVec[i] * stored[i];
+        }
+        if (dot > 0.3) {
+          results.push({
+            nodeId: row.node_id,
+            score: dot * 10, // scale to comparable range
+            strategy: "vector",
+            reason: `similarity: ${dot.toFixed(3)}`,
+          });
+        }
+      }
+
+      return results.sort((a, b) => b.score - a.score).slice(0, limit);
+    } catch {
+      return [];
+    }
+  },
+};
+
 // --- Strategy Registry (プラグイン拡張ポイント) ---
 
 const defaultStrategies: SearchStrategy[] = [
@@ -260,6 +323,7 @@ const defaultStrategies: SearchStrategy[] = [
   temporalStrategy,
   graphWalkStrategy,
   tagClusterStrategy,
+  vectorStrategy,
 ];
 
 /**

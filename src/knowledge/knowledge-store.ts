@@ -7,6 +7,7 @@ import {
   reindexAllNodes,
 } from "./neuron.js";
 import { multiStrategySearch } from "./multi-strategy.js";
+import { embed, embedAndStore, embedAllNodes } from "./embeddings.js";
 import { tokenize, tokenizeQuery } from "./tokenizer.js";
 
 // Sync wrapper for tokenizeQuery (no async needed)
@@ -66,8 +67,11 @@ export class KnowledgeStore {
       }
     }
 
-    // Index tokens for synapse search
+    // Index tokens for neuron search
     indexNodeTokens(this.db, id, input.content, input.summary, tags);
+
+    // Queue embedding generation (async, non-blocking)
+    embedAndStore(this.db, id, `${input.summary}\n${input.content}`.slice(0, 512)).catch(() => {});
 
     return this.getNode(id)!;
   }
@@ -129,10 +133,32 @@ export class KnowledgeStore {
   }
 
   /**
+   * Prepare query vector for vector strategy (async, call before searchForAnswer).
+   */
+  async prepareQueryVector(question: string): Promise<void> {
+    try {
+      const vector = await embed(question);
+      const buffer = Buffer.from(vector.buffer);
+      this.db.exec("CREATE TEMP TABLE IF NOT EXISTS _query_vector (vector BLOB)");
+      this.db.prepare("DELETE FROM _query_vector").run();
+      this.db.prepare("INSERT INTO _query_vector (vector) VALUES (?)").run(buffer);
+    } catch {
+      // Embedding not available, vector strategy will return empty
+    }
+  }
+
+  /**
+   * Embed all nodes that don't have embeddings yet.
+   */
+  async embedAll(): Promise<number> {
+    return embedAllNodes(this.db);
+  }
+
+  /**
    * Search for answer-worthy knowledge using multi-strategy retrieval.
    *
-   * Runs 5 strategies in parallel:
-   *   Synapse, Structural, Temporal, Graph Walk, Tag Cluster
+   * Runs 6 strategies in parallel:
+   *   Neuron, Structural, Temporal, Graph Walk, Tag Cluster, Vector
    * Then merges with cross-strategy bonus + confidence/access scoring.
    */
   searchForAnswer(

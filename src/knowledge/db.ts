@@ -339,6 +339,17 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_mece_cells_status ON mece_cells(status);
     `,
   },
+  {
+    version: 5,
+    sql: `
+      CREATE TABLE IF NOT EXISTS embeddings (
+        node_id TEXT PRIMARY KEY REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+        vector BLOB NOT NULL,
+        dimensions INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

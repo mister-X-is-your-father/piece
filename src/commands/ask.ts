@@ -12,7 +12,9 @@ import {
 } from "../agents/prompts/knowledge-extractor.js";
 import { KnowledgeStore } from "../knowledge/knowledge-store.js";
 import { MysteryStore } from "../knowledge/mystery-store.js";
-import { closeKnowledgeDB } from "../knowledge/db.js";
+import { closeKnowledgeDB, getKnowledgeDB } from "../knowledge/db.js";
+import { learnConceptLink } from "../knowledge/synapse.js";
+import { tokenizeQuery } from "../knowledge/tokenizer.js";
 import type { ScribeMetadata } from "../config/schema.js";
 import type { KnowledgeSearchResult } from "../knowledge/schemas.js";
 import { logger } from "../utils/logger.js";
@@ -177,7 +179,8 @@ export async function runAsk(
           result.answer,
           result.specialistsConsulted,
           knowledgeStore,
-          config.knowledge.knowledgeExtractorModel
+          config.knowledge.knowledgeExtractorModel,
+          scribePath
         );
         spinner3.succeed(`Saved ${nodesSaved} knowledge nodes`);
       } catch (err) {
@@ -245,7 +248,8 @@ async function extractAndSaveKnowledge(
   answer: string,
   specialistsConsulted: string[],
   store: KnowledgeStore,
-  model: string
+  model: string,
+  scribePath?: string
 ): Promise<number> {
   const task: AgentTask = {
     id: "knowledge-extractor",
@@ -332,7 +336,90 @@ async function extractAndSaveKnowledge(
     }
   }
 
+  // --- Auto-grow concept mesh ---
+  if (scribePath) {
+    const db = getKnowledgeDB(scribePath);
+    autoGrowConceptMesh(db, question, answer, nodeIds, store);
+  }
+
+  // --- Hebbian learning: co-accessed nodes strengthen links ---
+  if (nodeIds.length >= 2) {
+    store.recordCoAccess(nodeIds);
+  }
+
   return nodeIds.length;
+}
+
+// --- Concept Mesh Auto-Growth ---
+
+/**
+ * Automatically learn concept links from question + answer pairs.
+ *
+ * Strategy:
+ * 1. Extract terms from question and answer
+ * 2. Terms that appear in both → strong co-occurrence link
+ * 3. Tags from created nodes → link to question terms
+ * 4. Cross-language pairs (Japanese term in question, English in answer) → bilingual link
+ */
+function autoGrowConceptMesh(
+  db: Parameters<typeof learnConceptLink>[0],
+  question: string,
+  answer: string,
+  nodeIds: string[],
+  store: KnowledgeStore
+): void {
+  try {
+    const { originalTerms: questionTerms } = tokenizeQuery(question);
+    const { originalTerms: answerTerms } = tokenizeQuery(answer);
+
+    // 1. Question terms × Answer terms co-occurrence
+    // (Terms appearing in both question context and answer context are related)
+    for (const qt of questionTerms) {
+      for (const at of answerTerms) {
+        if (qt === at) continue;
+        if (qt.length < 2 || at.length < 2) continue;
+        // Only learn cross-script pairs (JP↔EN) or semantically distinct terms
+        const qtIsJp = /[\u3040-\u9fff]/.test(qt);
+        const atIsJp = /[\u3040-\u9fff]/.test(at);
+        if (qtIsJp !== atIsJp) {
+          // Cross-language pair — high value
+          learnConceptLink(db, qt, at, "co_occurrence");
+        }
+      }
+    }
+
+    // 2. Tags from new nodes → link to question terms
+    for (const nodeId of nodeIds) {
+      const tags = store.getNodeTags(nodeId);
+      for (const tag of tags) {
+        for (const qt of questionTerms) {
+          if (tag.toLowerCase() === qt.toLowerCase()) continue;
+          if (tag.length < 2 || qt.length < 2) continue;
+          learnConceptLink(db, qt, tag, "co_occurrence");
+        }
+      }
+    }
+
+    // 3. Inter-tag links (tags that co-occur in the same answer context)
+    const allTags = new Set<string>();
+    for (const nodeId of nodeIds) {
+      for (const tag of store.getNodeTags(nodeId)) {
+        allTags.add(tag.toLowerCase());
+      }
+    }
+    const tagList = [...allTags];
+    for (let i = 0; i < tagList.length; i++) {
+      for (let j = i + 1; j < tagList.length; j++) {
+        learnConceptLink(db, tagList[i], tagList[j], "co_occurrence");
+      }
+    }
+
+    logger.debug(
+      `Concept mesh growth: ${questionTerms.length} question terms × ${answerTerms.length} answer terms, ${allTags.size} tags`
+    );
+  } catch (err) {
+    logger.debug(`Concept mesh growth failed: ${err}`);
+  }
 }
 
 // --- Mystery Detection ---

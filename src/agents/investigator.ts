@@ -137,6 +137,27 @@ export async function runInvestigate(
           }
         }
 
+        // Hebbian learning + concept mesh growth from investigation
+        if (nodeIds.length >= 2) {
+          knowledgeStore.recordCoAccess(nodeIds);
+        }
+        // Learn concept links from tags
+        const { learnConceptLink } = await import("../knowledge/synapse.js");
+        const { getKnowledgeDB } = await import("../knowledge/db.js");
+        const db = getKnowledgeDB(scribePath);
+        const allTags = new Set<string>();
+        for (const nid of nodeIds) {
+          for (const t of knowledgeStore.getNodeTags(nid)) {
+            allTags.add(t.toLowerCase());
+          }
+        }
+        const tagArr = [...allTags];
+        for (let i = 0; i < tagArr.length; i++) {
+          for (let j = i + 1; j < tagArr.length; j++) {
+            learnConceptLink(db, tagArr[i], tagArr[j], "co_occurrence");
+          }
+        }
+
         // Create new mysteries
         let newMysteries = 0;
         for (const m of result.new_mysteries || []) {

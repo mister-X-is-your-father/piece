@@ -11,6 +11,7 @@ import { runFlows } from "./agents/flow-tracer.js";
 import { runKnowledge } from "./commands/knowledge.js";
 import { runVaultExport, runVaultImport, runVaultSync } from "./commands/vault.js";
 import { runFeedback } from "./commands/feedback.js";
+import { runAppMap } from "./commands/app-map.js";
 import { setLogLevel } from "./utils/logger.js";
 import { setBackend, type Backend } from "./claude/client.js";
 
@@ -152,6 +153,21 @@ program
   .action(async (path: string, options) => {
     if (options.verbose) setLogLevel("debug");
     await runFeedback(path, options);
+  });
+
+program
+  .command("app-map")
+  .description("Detect screens, APIs, operations, and features from code")
+  .argument("<path>", "Path to the web app project")
+  .option("--screens", "Show detected screens")
+  .option("--endpoints", "Show detected API endpoints")
+  .option("--features", "Show detected features")
+  .option("--operations", "Show detected operations")
+  .option("--export", "Export app map as markdown")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runAppMap(path, options);
   });
 
 program

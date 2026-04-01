@@ -399,6 +399,59 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 7,
+    sql: `
+      CREATE TABLE IF NOT EXISTS screens (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, route TEXT, description TEXT,
+        file_path TEXT NOT NULL, component_name TEXT, layout TEXT,
+        status TEXT NOT NULL DEFAULT 'detected',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS endpoints (
+        id TEXT PRIMARY KEY, method TEXT NOT NULL, path TEXT NOT NULL,
+        description TEXT, handler_file TEXT NOT NULL, handler_function TEXT,
+        request_params TEXT, response_type TEXT,
+        status TEXT NOT NULL DEFAULT 'detected',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS operations (
+        id TEXT PRIMARY KEY, screen_id TEXT REFERENCES screens(id),
+        name TEXT NOT NULL, description TEXT,
+        trigger_type TEXT, handler_file TEXT, handler_function TEXT,
+        calls_endpoint_id TEXT REFERENCES endpoints(id), step_order INTEGER,
+        status TEXT NOT NULL DEFAULT 'detected',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS features (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+        status TEXT NOT NULL DEFAULT 'detected',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS feature_connections (
+        id TEXT PRIMARY KEY,
+        feature_id TEXT NOT NULL REFERENCES features(id) ON DELETE CASCADE,
+        target_type TEXT NOT NULL, target_id TEXT NOT NULL, role TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS operation_flows (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT,
+        feature_id TEXT REFERENCES features(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS operation_flow_steps (
+        id TEXT PRIMARY KEY,
+        flow_id TEXT NOT NULL REFERENCES operation_flows(id) ON DELETE CASCADE,
+        step_order INTEGER NOT NULL, action_type TEXT NOT NULL,
+        description TEXT NOT NULL,
+        screen_id TEXT REFERENCES screens(id),
+        operation_id TEXT REFERENCES operations(id),
+        endpoint_id TEXT REFERENCES endpoints(id),
+        file_path TEXT, line_number INTEGER, code_snippet TEXT,
+        UNIQUE(flow_id, step_order)
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

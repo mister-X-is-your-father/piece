@@ -142,7 +142,7 @@ export async function runInvestigate(
           knowledgeStore.recordCoAccess(nodeIds);
         }
         // Learn concept links from tags
-        const { learnConceptLink } = await import("../knowledge/synapse.js");
+        const { learnConceptLink } = await import("../knowledge/neuron.js");
         const { getKnowledgeDB } = await import("../knowledge/db.js");
         const db = getKnowledgeDB(scribePath);
         const allTags = new Set<string>();

@@ -32,7 +32,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { synapseSearch, type ActivatedNode } from "./synapse.js";
+import { synapseSearch, type ActivatedNode } from "./neuron.js";
 import { tokenizeQuery } from "./tokenizer.js";
 
 // --- Strategy Interface (プラグイン拡張可能) ---

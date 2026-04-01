@@ -21,7 +21,7 @@
 import type Database from "better-sqlite3";
 import { generateId } from "./db.js";
 import { tokenize } from "./tokenizer.js";
-import { indexNodeTokens } from "./synapse.js";
+import { indexNodeTokens } from "./neuron.js";
 
 // --- Atom: 最小知識単位 ---
 

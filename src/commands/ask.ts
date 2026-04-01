@@ -13,7 +13,7 @@ import {
 import { KnowledgeStore } from "../knowledge/knowledge-store.js";
 import { MysteryStore } from "../knowledge/mystery-store.js";
 import { closeKnowledgeDB, getKnowledgeDB } from "../knowledge/db.js";
-import { learnConceptLink } from "../knowledge/synapse.js";
+import { learnConceptLink } from "../knowledge/neuron.js";
 import { tokenizeQuery } from "../knowledge/tokenizer.js";
 import type { ScribeMetadata } from "../config/schema.js";
 import type { KnowledgeSearchResult } from "../knowledge/schemas.js";

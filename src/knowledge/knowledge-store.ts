@@ -5,7 +5,7 @@ import {
   indexNodeTokens,
   hebbianUpdate,
   reindexAllNodes,
-} from "./synapse.js";
+} from "./neuron.js";
 import { multiStrategySearch } from "./multi-strategy.js";
 import { tokenize, tokenizeQuery } from "./tokenizer.js";
 

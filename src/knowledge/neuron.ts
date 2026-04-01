@@ -1,5 +1,5 @@
 /**
- * Synapse: Brain-inspired knowledge retrieval engine.
+ * Neuron: Brain-inspired knowledge retrieval engine.
  *
  * Based on neuroscience principles:
  * 1. Spreading Activation — concepts activate related concepts through links

@@ -14,7 +14,7 @@ import { join, basename, dirname } from "node:path";
 import matter from "gray-matter";
 import type Database from "better-sqlite3";
 import { getKnowledgeDB, generateId } from "./db.js";
-import { indexNodeTokens, learnConceptLink } from "./synapse.js";
+import { indexNodeTokens, learnConceptLink } from "./neuron.js";
 import { hashContent } from "../utils/hash.js";
 import { logger } from "../utils/logger.js";
 import type { KnowledgeNodeInsert } from "./schemas.js";

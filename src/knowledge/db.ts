@@ -306,6 +306,39 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 4,
+    sql: `
+      CREATE TABLE IF NOT EXISTS mece_matrices (
+        id TEXT PRIMARY KEY,
+        target TEXT NOT NULL,
+        target_type TEXT NOT NULL CHECK(target_type IN ('function', 'module', 'flow', 'custom')),
+        template TEXT NOT NULL,
+        rows_json TEXT NOT NULL,
+        cols_json TEXT NOT NULL,
+        coverage REAL NOT NULL DEFAULT 0.0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_mece_target ON mece_matrices(target);
+
+      CREATE TABLE IF NOT EXISTS mece_cells (
+        id TEXT PRIMARY KEY,
+        matrix_id TEXT NOT NULL REFERENCES mece_matrices(id) ON DELETE CASCADE,
+        row_label TEXT NOT NULL,
+        col_label TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'uncovered' CHECK(status IN (
+          'covered', 'uncovered', 'not_applicable', 'partial'
+        )),
+        evidence_id TEXT,
+        note TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(matrix_id, row_label, col_label)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mece_cells_matrix ON mece_cells(matrix_id);
+      CREATE INDEX IF NOT EXISTS idx_mece_cells_status ON mece_cells(status);
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

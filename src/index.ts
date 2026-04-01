@@ -9,6 +9,7 @@ import { runMysteries } from "./commands/mysteries.js";
 import { runInvestigate } from "./agents/investigator.js";
 import { runFlows } from "./agents/flow-tracer.js";
 import { runKnowledge } from "./commands/knowledge.js";
+import { runVaultExport, runVaultImport, runVaultSync } from "./commands/vault.js";
 import { setLogLevel } from "./utils/logger.js";
 import { setBackend, type Backend } from "./claude/client.js";
 
@@ -134,6 +135,48 @@ program
   .option("-v, --verbose", "Verbose output")
   .action(async (path: string, options) => {
     await runKnowledge(path, options);
+  });
+
+// === Obsidian Vault Integration ===
+
+const vault = program.command("vault").description("Obsidian vault integration");
+
+vault
+  .command("export")
+  .description("Export knowledge DB → Obsidian vault")
+  .argument("<path>", "Path to the analyzed project")
+  .option("-o, --output <path>", "Vault output path (default: .scribe/vault)")
+  .option("--flat", "Flat structure (no specialist folders)")
+  .option("--no-backlinks", "Skip backlinks section")
+  .option("--no-daily-notes", "Skip daily notes")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runVaultExport(path, options);
+  });
+
+vault
+  .command("import")
+  .description("Import Obsidian vault → knowledge DB")
+  .argument("<path>", "Path to the analyzed project")
+  .argument("<vault>", "Path to Obsidian vault to import")
+  .option("--specialist <name>", "Assign imported notes to specialist")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, vaultPath: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runVaultImport(path, vaultPath, options);
+  });
+
+vault
+  .command("sync")
+  .description("Bidirectional sync: knowledge DB ↔ Obsidian vault")
+  .argument("<path>", "Path to the analyzed project")
+  .option("-o, --output <path>", "Vault path (default: .scribe/vault)")
+  .option("--flat", "Flat structure")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runVaultSync(path, options);
   });
 
 program.parse();

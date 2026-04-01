@@ -241,6 +241,71 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 3,
+    sql: `
+      -- Atomic knowledge units
+      CREATE TABLE IF NOT EXISTS atoms (
+        id TEXT PRIMARY KEY,
+        claim TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        code_snippet TEXT NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        specialist TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_atoms_file ON atoms(file_path);
+      CREATE INDEX IF NOT EXISTS idx_atoms_specialist ON atoms(specialist);
+      CREATE INDEX IF NOT EXISTS idx_atoms_verified ON atoms(verified);
+
+      CREATE TABLE IF NOT EXISTS atom_tags (
+        atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY(atom_id, tag)
+      );
+      CREATE INDEX IF NOT EXISTS idx_atom_tags_tag ON atom_tags(tag);
+
+      CREATE TABLE IF NOT EXISTS atom_links (
+        id TEXT PRIMARY KEY,
+        source_atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+        target_atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+        relation TEXT NOT NULL CHECK(relation IN (
+          'implies', 'requires', 'contradicts', 'elaborates', 'part_of'
+        )),
+        confidence REAL NOT NULL DEFAULT 1.0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(source_atom_id, target_atom_id, relation)
+      );
+      CREATE INDEX IF NOT EXISTS idx_atom_links_source ON atom_links(source_atom_id);
+      CREATE INDEX IF NOT EXISTS idx_atom_links_target ON atom_links(target_atom_id);
+
+      CREATE TABLE IF NOT EXISTS completeness_map (
+        path TEXT PRIMARY KEY,
+        path_type TEXT NOT NULL CHECK(path_type IN ('file', 'directory')),
+        total_functions INTEGER NOT NULL DEFAULT 0,
+        documented_functions INTEGER NOT NULL DEFAULT 0,
+        total_atoms INTEGER NOT NULL DEFAULT 0,
+        verified_atoms INTEGER NOT NULL DEFAULT 0,
+        coverage REAL NOT NULL DEFAULT 0.0,
+        last_scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS contradictions (
+        id TEXT PRIMARY KEY,
+        atom_a_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+        atom_b_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+        description TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'accepted')),
+        resolution TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

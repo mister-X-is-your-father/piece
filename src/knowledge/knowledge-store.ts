@@ -6,6 +6,7 @@ import {
   hebbianUpdate,
   reindexAllNodes,
 } from "./synapse.js";
+import { multiStrategySearch } from "./multi-strategy.js";
 import { tokenize, tokenizeQuery } from "./tokenizer.js";
 
 // Sync wrapper for tokenizeQuery (no async needed)
@@ -128,27 +129,28 @@ export class KnowledgeStore {
   }
 
   /**
-   * Search for answer-worthy knowledge using spreading activation.
-   * Combines synapse activation with confidence and access frequency.
+   * Search for answer-worthy knowledge using multi-strategy retrieval.
+   *
+   * Runs 5 strategies in parallel:
+   *   Synapse, Structural, Temporal, Graph Walk, Tag Cluster
+   * Then merges with cross-strategy bonus + confidence/access scoring.
    */
   searchForAnswer(
     question: string,
     limit: number = 10
   ): KnowledgeSearchResult[] {
-    const activated = synapseSearch(this.db, question, {
-      limit: limit * 2, // get more candidates for scoring
-      conceptExpansion: true,
-      maxDepth: 2,
+    const multiResults = multiStrategySearch(this.db, question, {
+      limit: limit * 2,
     });
 
-    return activated
-      .map((a) => {
-        const node = this.getNode(a.nodeId);
+    return multiResults
+      .map((r) => {
+        const node = this.getNode(r.nodeId);
         if (!node) return null;
-        const citations = this.getCitationsForNode(a.nodeId);
-        // Combined score: synapse activation + confidence + access frequency
+        const citations = this.getCitationsForNode(r.nodeId);
+        // Combined: multi-strategy score + node quality
         const combinedScore =
-          a.activation * 2 + node.confidence * 10 + node.access_count * 0.5;
+          r.finalScore + node.confidence * 10 + node.access_count * 0.5;
         return {
           node,
           relevance: combinedScore,

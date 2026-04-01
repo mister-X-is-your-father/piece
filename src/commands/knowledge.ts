@@ -5,7 +5,9 @@ import { KnowledgeStore } from "../knowledge/knowledge-store.js";
 import { MysteryStore } from "../knowledge/mystery-store.js";
 import { FlowStore } from "../knowledge/flow-store.js";
 import { InvestigationStore } from "../knowledge/investigation-store.js";
-import { closeKnowledgeDB } from "../knowledge/db.js";
+import { AtomStore } from "../knowledge/atomic.js";
+import { getAvailableStrategies } from "../knowledge/multi-strategy.js";
+import { closeKnowledgeDB, getKnowledgeDB } from "../knowledge/db.js";
 
 export interface KnowledgeOptions {
   search?: string;
@@ -40,7 +42,8 @@ export async function runKnowledge(
     }
 
     // Default: show stats
-    showStats(knowledgeStore, mysteryStore, flowStore, investigationStore);
+    const atomStore = new AtomStore(getKnowledgeDB(scribePath));
+    showStats(knowledgeStore, mysteryStore, flowStore, investigationStore, atomStore);
   } finally {
     closeKnowledgeDB();
   }
@@ -50,7 +53,8 @@ function showStats(
   knowledgeStore: KnowledgeStore,
   mysteryStore: MysteryStore,
   flowStore: FlowStore,
-  investigationStore: InvestigationStore
+  investigationStore: InvestigationStore,
+  atomStore: AtomStore
 ): void {
   const nodeCount = knowledgeStore.getNodeCount();
   const tags = knowledgeStore.getAllTags();
@@ -58,10 +62,22 @@ function showStats(
   const flowCount = flowStore.getFlowCount();
   const invStats = investigationStore.getStats();
   const cacheStats = knowledgeStore.getQueryCacheStats();
+  const strategies = getAvailableStrategies();
 
   console.log(chalk.cyan("━━━ Knowledge Brain Stats ━━━\n"));
 
-  console.log(chalk.cyan("Knowledge Nodes"));
+  // Completeness
+  const overall = atomStore.getOverallCompleteness();
+  const coveragePct = (overall.coverage * 100).toFixed(1);
+  const coverageBar = renderBar(overall.coverage, 20);
+  console.log(chalk.cyan("Completeness"));
+  console.log(`  ${coverageBar} ${coveragePct}%`);
+  console.log(`  Atoms: ${overall.totalAtoms} (${overall.verifiedAtoms} verified)`);
+  if (overall.contradictions > 0) {
+    console.log(chalk.red(`  Contradictions: ${overall.contradictions} open`));
+  }
+
+  console.log(chalk.cyan("\nKnowledge Nodes"));
   console.log(`  Total: ${nodeCount}`);
   if (tags.length > 0) {
     console.log(`  Top tags: ${tags.slice(0, 10).map((t) => `${t.tag}(${t.count})`).join(", ")}`);
@@ -83,6 +99,27 @@ function showStats(
   console.log(
     `  Total: ${invStats.total} | Completed: ${invStats.completed} | Nodes created: ${invStats.totalNodesCreated} | Mysteries resolved: ${invStats.totalMysteriesResolved}`
   );
+
+  console.log(chalk.cyan("\nSearch Strategies"));
+  for (const s of strategies) {
+    console.log(`  ${s.name} (w=${s.weight}): ${s.description}`);
+  }
+
+  // Completeness map (top gaps)
+  const map = atomStore.getCompletenessMap();
+  if (map.length > 0) {
+    console.log(chalk.cyan("\nCompleteness Map (lowest coverage)"));
+    for (const entry of map.slice(0, 5)) {
+      const bar = renderBar(entry.coverage, 15);
+      console.log(`  ${bar} ${(entry.coverage * 100).toFixed(0)}% ${entry.path}`);
+    }
+  }
+}
+
+function renderBar(ratio: number, width: number): string {
+  const filled = Math.round(ratio * width);
+  const empty = width - filled;
+  return chalk.green("█".repeat(filled)) + chalk.gray("░".repeat(empty));
 }
 
 function searchKnowledge(

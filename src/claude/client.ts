@@ -1,13 +1,6 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
 import pLimit from "p-limit";
 import { logger } from "../utils/logger.js";
-import { generateId } from "../knowledge/db.js";
-
-const execFileAsync = promisify(execFile);
 
 // --- Backend Selection ---
 
@@ -54,53 +47,72 @@ interface ClaudeCliResult {
 }
 
 async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
-  // Build the full prompt with system prompt embedded
   const fullPrompt = `${req.systemPrompt}\n\n---\n\n${req.userPrompt}`;
 
-  // Write prompt to temp file to avoid arg length limits
-  const tmpFile = join(tmpdir(), `scribe-prompt-${generateId()}.txt`);
-  writeFileSync(tmpFile, fullPrompt, "utf-8");
-
-  try {
-    const { stdout } = await execFileAsync(
+  return new Promise((resolve, reject) => {
+    const child = spawn(
       "claude",
       [
-        "-p", fullPrompt,
+        "-p", "-",            // read prompt from stdin
         "--output-format", "json",
         "--max-turns", "1",
-        "--no-input",
       ],
       {
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-        timeout: 300_000, // 5 minutes
+        stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env },
       }
     );
 
-    const parsed = JSON.parse(stdout) as ClaudeCliResult;
+    let stdout = "";
+    let stderr = "";
 
-    if (parsed.is_error) {
-      throw new Error(`Claude Code error: ${parsed.result}`);
-    }
+    child.stdout.on("data", (data: Buffer) => { stdout += data.toString(); });
+    child.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
 
-    // Extract token usage from modelUsage
-    let inputTokens = 0;
-    let outputTokens = 0;
-    if (parsed.modelUsage) {
-      for (const usage of Object.values(parsed.modelUsage)) {
-        inputTokens += usage.inputTokens || 0;
-        outputTokens += usage.outputTokens || 0;
+    // Write prompt via stdin (no arg length limit)
+    child.stdin.write(fullPrompt);
+    child.stdin.end();
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("Claude Code timed out after 5 minutes"));
+    }, 300_000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+
+      if (code !== 0 && !stdout) {
+        reject(new Error(`Claude Code exited with code ${code}: ${stderr.slice(0, 200)}`));
+        return;
       }
-    }
 
-    return {
-      content: parsed.result,
-      inputTokens,
-      outputTokens,
-    };
-  } finally {
-    try { unlinkSync(tmpFile); } catch { /* ignore */ }
-  }
+      try {
+        const parsed = JSON.parse(stdout) as ClaudeCliResult;
+
+        if (parsed.is_error) {
+          reject(new Error(`Claude Code error: ${parsed.result}`));
+          return;
+        }
+
+        let inputTokens = 0;
+        let outputTokens = 0;
+        if (parsed.modelUsage) {
+          for (const usage of Object.values(parsed.modelUsage)) {
+            inputTokens += usage.inputTokens || 0;
+            outputTokens += usage.outputTokens || 0;
+          }
+        }
+
+        resolve({
+          content: parsed.result,
+          inputTokens,
+          outputTokens,
+        });
+      } catch (err) {
+        reject(new Error(`Failed to parse Claude Code output: ${(err as Error).message}\nstdout: ${stdout.slice(0, 200)}`));
+      }
+    });
+  });
 }
 
 // --- Direct API Backend (fallback if API key is set) ---

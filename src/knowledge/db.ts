@@ -350,6 +350,55 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 6,
+    sql: `
+      CREATE TABLE IF NOT EXISTS feedback_events (
+        id TEXT PRIMARY KEY,
+        query_cache_id TEXT REFERENCES query_cache(id),
+        question TEXT NOT NULL,
+        answer_summary TEXT NOT NULL,
+        rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+        feedback_text TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS node_feedback (
+        id TEXT PRIMARY KEY,
+        feedback_event_id TEXT NOT NULL REFERENCES feedback_events(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+        verdict TEXT NOT NULL CHECK(verdict IN (
+          'correct', 'incorrect', 'misleading', 'outdated', 'incomplete'
+        )),
+        correction TEXT,
+        before_confidence REAL NOT NULL,
+        after_confidence REAL NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS strategy_performance (
+        id TEXT PRIMARY KEY,
+        feedback_event_id TEXT NOT NULL REFERENCES feedback_events(id) ON DELETE CASCADE,
+        strategy_name TEXT NOT NULL,
+        contributed_node_ids TEXT NOT NULL,
+        was_helpful INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS learned_rules (
+        id TEXT PRIMARY KEY,
+        rule_type TEXT NOT NULL CHECK(rule_type IN (
+          'avoid_node', 'boost_node', 'concept_correction', 'strategy_adjust', 'answer_pattern'
+        )),
+        condition_text TEXT NOT NULL,
+        action_text TEXT NOT NULL,
+        strength REAL NOT NULL DEFAULT 1.0,
+        applied_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

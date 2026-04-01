@@ -10,6 +10,7 @@ import { runInvestigate } from "./agents/investigator.js";
 import { runFlows } from "./agents/flow-tracer.js";
 import { runKnowledge } from "./commands/knowledge.js";
 import { runVaultExport, runVaultImport, runVaultSync } from "./commands/vault.js";
+import { runFeedback } from "./commands/feedback.js";
 import { setLogLevel } from "./utils/logger.js";
 import { setBackend, type Backend } from "./claude/client.js";
 
@@ -135,6 +136,22 @@ program
   .option("-v, --verbose", "Verbose output")
   .action(async (path: string, options) => {
     await runKnowledge(path, options);
+  });
+
+program
+  .command("feedback")
+  .description("Send feedback on answers to improve future accuracy")
+  .argument("<path>", "Path to the analyzed project")
+  .option("--rating <n>", "Rating 1-5 (1=wrong, 5=perfect)", parseInt)
+  .option("--text <feedback>", "What was wrong or could be better")
+  .option("--query-id <id>", "Specific query cache ID to review")
+  .option("--list", "Show feedback history")
+  .option("--rules", "Show learned rules")
+  .option("--stats", "Show feedback statistics and improvement trend")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    await runFeedback(path, options);
   });
 
 program

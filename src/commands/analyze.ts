@@ -143,5 +143,5 @@ export async function runAnalyze(
       `  ${chalk.cyan(cluster.name)}: ${cluster.files.length} files — ${cluster.description}`
     );
   }
-  console.log(`\nRun ${chalk.cyan(`codebase-scribe ask ${targetPath} "your question"`)} to query`);
+  console.log(`\nRun ${chalk.cyan(`piece ask ${targetPath} "your question"`)} to query`);
 }

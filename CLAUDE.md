@@ -1,6 +1,6 @@
-# codebase-scribe
+# PIECE — Precise Integrated Expert Collaboration Engine
 
-自律成長型ナレッジ共有ツール。マルチエージェントでコードベースを深く分析し、ファクトチェック済みの回答を提供。使うほど賢くなる。
+正確な統合型専門家協調エンジン。マルチエージェントでコードベースを深く分析し、ファクトチェック済みの正確な回答を提供。使うほど賢くなる。
 
 ## Architecture
 
@@ -14,11 +14,11 @@
 ## Knowledge Brain (SQLite)
 
 `.scribe/knowledge.db` に知識を蓄積:
-- **knowledge_nodes** + FTS5全文検索 — 学んだ知識
-- **node_links** — 知識の接続グラフ
-- **mysteries** — 未解決の謎（優先度付きキュー）
-- **flows** — E2Eフロー
-- **query_cache** — 過去の質問・回答キャッシュ
+- **Synapse Engine** — N-gram + concept展開 + 拡散活性化 + ヘッブ学習
+- **Multi-Strategy Search** — 5戦略並行検索（synapse, structural, temporal, graph_walk, tag_cluster）
+- **Atomic Knowledge** — 原子的事実 + 証明チェイン + 矛盾検出
+- **MECE Matrix** — 組み合わせテーブルで知識の網羅性保証
+- **Concept Mesh** — 日英クロス言語類義語ネットワーク（自動成長）
 
 ## Commands
 
@@ -45,7 +45,7 @@ npm run dev -- knowledge <path> --graph    # 接続グラフ
 ## Tech Stack
 
 - TypeScript (ESM, NodeNext)
-- Anthropic SDK for Claude API
+- Claude Code CLI backend (APIキー不要、定額課金対応)
 - better-sqlite3 (knowledge DB)
 - Commander for CLI
 - Zod for validation
@@ -54,7 +54,7 @@ npm run dev -- knowledge <path> --graph    # 接続グラフ
 
 - `src/agents/` — エージェントシステム（5種）
 - `src/agents/prompts/` — 各エージェントのプロンプトテンプレート
-- `src/knowledge/` — SQLite知識DB + 4つのstore
+- `src/knowledge/` — SQLite知識DB + Synapse検索 + Atomic + MECE
 - `src/analyzer/` — コード分析パイプライン
 - `src/generator/` — ドキュメント生成
 - `src/config/schema.ts` — 全データ型定義（Zod）
@@ -62,9 +62,9 @@ npm run dev -- knowledge <path> --graph    # 接続グラフ
 ## Growth Cycle
 
 ```
-ask → DB検索 → 知識十分 → 即答（AI呼び出しなし）
-               ↓ 不足
-            AI回答 → 新知識をDB保存 → 謎検出
-               ↓
-            investigate → 謎を調査 → 知識追加 → 謎解決
+ask → DB検索(multi-strategy) → 知識十分 → 即答（AI呼び出しなし）
+                                ↓ 不足
+                             AI回答 → 新知識をDB保存 → concept mesh成長
+                                ↓
+                             investigate → 謎を調査 → 知識追加 → ヘッブ学習
 ```

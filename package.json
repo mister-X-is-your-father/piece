@@ -1,10 +1,10 @@
 {
-  "name": "codebase-scribe",
+  "name": "piece",
   "version": "0.1.0",
-  "description": "Reliable knowledge documentation tool with multi-agent fact-checking",
+  "description": "PIECE — Precise Integrated Expert Collaboration Engine",
   "type": "module",
   "bin": {
-    "codebase-scribe": "./dist/index.js"
+    "piece": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",

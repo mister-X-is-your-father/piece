@@ -15,9 +15,9 @@ import { setBackend, type Backend } from "./claude/client.js";
 const program = new Command();
 
 program
-  .name("codebase-scribe")
+  .name("piece")
   .description(
-    "Self-learning knowledge tool with multi-agent fact-checking"
+    "PIECE — Precise Integrated Expert Collaboration Engine"
   )
   .version("0.3.0")
   .option(

@@ -48,7 +48,7 @@ export async function runAsk(
   } catch {
     console.error(
       chalk.red(
-        `No analysis found at ${scribePath}. Run 'codebase-scribe analyze ${targetPath}' first.`
+        `No analysis found at ${scribePath}. Run 'piece analyze ${targetPath}' first.`
       )
     );
     process.exit(1);

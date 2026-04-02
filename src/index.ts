@@ -171,6 +171,90 @@ program
   });
 
 program
+  .command("impact")
+  .description("Analyze impact: what breaks if this file changes?")
+  .argument("<path>", "Path to the project")
+  .argument("<file>", "File to analyze impact for")
+  .action(async (path: string, file: string) => {
+    const { resolve } = await import("node:path");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { loadConfig } = await import("./config/loader.js");
+    const { analyzeImpact, formatImpactReport } = await import("./knowledge/impact-analysis.js");
+    const config = await loadConfig(resolve(path));
+    const db = getKnowledgeDB(resolve(path, config.output.directory));
+    const report = analyzeImpact(db, file);
+    console.log(formatImpactReport(report));
+    closeKnowledgeDB();
+  });
+
+program
+  .command("diff-watch")
+  .description("Detect code changes and mark stale knowledge")
+  .argument("<path>", "Path to the project")
+  .option("--since <ref>", "Git ref to compare against (default: HEAD~1)")
+  .action(async (path: string, options: { since?: string }) => {
+    const { resolve } = await import("node:path");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { loadConfig } = await import("./config/loader.js");
+    const { detectAndMarkStale } = await import("./knowledge/diff-watch.js");
+    const chalk = (await import("chalk")).default;
+    const config = await loadConfig(resolve(path));
+    const db = getKnowledgeDB(resolve(path, config.output.directory));
+    const result = detectAndMarkStale(db, resolve(path), options.since);
+    console.log(`Changed files: ${result.changedFiles.length}`);
+    console.log(`Stale nodes: ${result.staleNodes}`);
+    console.log(`Mysteries created: ${result.mysteriesCreated}`);
+    closeKnowledgeDB();
+  });
+
+program
+  .command("onboarding")
+  .description("Generate onboarding guide for new team members")
+  .argument("<path>", "Path to the project")
+  .action(async (path: string) => {
+    const { resolve } = await import("node:path");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { loadConfig } = await import("./config/loader.js");
+    const { generateOnboardingGuide, formatOnboardingGuide } = await import("./knowledge/onboarding.js");
+    const config = await loadConfig(resolve(path));
+    const scribePath = resolve(path, config.output.directory);
+    const db = getKnowledgeDB(scribePath);
+    const guide = await generateOnboardingGuide(db, scribePath);
+    console.log(formatOnboardingGuide(guide));
+    closeKnowledgeDB();
+  });
+
+program
+  .command("git-ingest")
+  .description("Ingest git history as knowledge")
+  .argument("<path>", "Path to the project")
+  .option("--limit <n>", "Number of commits to ingest", parseInt, 50)
+  .action(async (path: string, options: { limit: number }) => {
+    const { resolve } = await import("node:path");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { loadConfig } = await import("./config/loader.js");
+    const { ingestGitHistory } = await import("./knowledge/git-intel.js");
+    const config = await loadConfig(resolve(path));
+    const db = getKnowledgeDB(resolve(path, config.output.directory));
+    const count = ingestGitHistory(db, resolve(path), options.limit);
+    console.log(`Ingested ${count} commits as knowledge`);
+    closeKnowledgeDB();
+  });
+
+program
+  .command("dashboard")
+  .description("Start web dashboard for knowledge visualization")
+  .argument("<path>", "Path to the project")
+  .option("--port <n>", "Port number", parseInt, 3141)
+  .action(async (path: string, options: { port: number }) => {
+    const { resolve } = await import("node:path");
+    const { loadConfig } = await import("./config/loader.js");
+    const { startDashboard } = await import("./dashboard/server.js");
+    const config = await loadConfig(resolve(path));
+    await startDashboard(resolve(path, config.output.directory), options.port);
+  });
+
+program
   .command("reindex")
   .description("Rebuild SQLite index from vault markdown files")
   .argument("<path>", "Path to the project")

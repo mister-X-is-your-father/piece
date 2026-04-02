@@ -267,6 +267,19 @@ program
   });
 
 program
+  .command("investigate-full")
+  .description("Full automated investigation: gather → trace → eliminate → report")
+  .argument("<path>", "Path to the project")
+  .argument("<symptom>", "Bug symptom or issue description")
+  .option("--log <file>", "Log file to include in analysis")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, symptom: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    const { runFullInvestigation } = await import("./agents/investigation-pipeline.js");
+    await runFullInvestigation(path, symptom, options);
+  });
+
+program
   .command("logs")
   .description("Analyze logs: ingest, detect patterns, find root causes")
   .argument("<path>", "Path to the project")

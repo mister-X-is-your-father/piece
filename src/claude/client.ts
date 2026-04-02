@@ -6,7 +6,16 @@ import { logger } from "../utils/logger.js";
 
 export type Backend = "claude-code" | "api";
 
-let currentBackend: Backend = "claude-code"; // default: Claude Code CLI
+let currentBackend: Backend = detectBackend();
+
+function detectBackend(): Backend {
+  // If API credentials are available, prefer API (works in remote triggers)
+  if (process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+    return "api";
+  }
+  // Default: Claude Code CLI (local development)
+  return "claude-code";
+}
 
 export function setBackend(backend: Backend): void {
   currentBackend = backend;

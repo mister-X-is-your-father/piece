@@ -255,6 +255,18 @@ program
   });
 
 program
+  .command("debug")
+  .description("Debug investigation: eliminate hypotheses to find root cause")
+  .argument("<path>", "Path to the project")
+  .argument("<symptom>", "Bug symptom or error description")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, symptom: string, options) => {
+    if (options.verbose) setLogLevel("debug");
+    const { runDebug } = await import("./agents/debugger.js");
+    await runDebug(path, symptom, options);
+  });
+
+program
   .command("reindex")
   .description("Rebuild SQLite index from vault markdown files")
   .argument("<path>", "Path to the project")

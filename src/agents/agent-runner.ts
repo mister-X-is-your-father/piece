@@ -27,7 +27,7 @@ export async function runAgentTasks(
   let completed = 0;
 
   const promises = tasks.map((task) =>
-    limiter(async () => {
+    limiter(async (): Promise<AgentTaskResult | null> => {
       const start = Date.now();
       logger.debug(`Running agent task: ${task.id}`);
 
@@ -51,13 +51,20 @@ export async function runAgentTasks(
           durationMs: duration,
         };
       } catch (err) {
-        logger.error(`Agent task ${task.id} failed: ${err}`);
-        throw err;
+        completed++;
+        logger.error(`Agent task ${task.id} failed (${completed}/${tasks.length}): ${err}`);
+        // Return a fallback empty response instead of crashing the whole batch
+        return {
+          id: task.id,
+          response: { content: `[Analysis failed for ${task.id}]`, inputTokens: 0, outputTokens: 0 },
+          durationMs: Date.now() - start,
+        };
       }
     })
   );
 
-  return Promise.all(promises);
+  const results = await Promise.all(promises);
+  return results.filter((r): r is AgentTaskResult => r !== null);
 }
 
 /**

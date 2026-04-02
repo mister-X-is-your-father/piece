@@ -105,6 +105,40 @@ async function loadSpecialistDocs(
   const specialistDir = join(scribePath, "specialists", specialistName);
   const parts: string[] = [];
 
+  // Load code index first — gives specialist concrete file:line references
+  try {
+    const codeIndexRaw = await readFile(
+      join(specialistDir, "_code-index.json"),
+      "utf-8"
+    );
+    const codeIndex = JSON.parse(codeIndexRaw) as Array<{
+      file: string;
+      exports: { name: string; kind: string; line: number }[];
+      functions: { name: string; startLine: number; endLine: number }[];
+    }>;
+    if (codeIndex.length > 0) {
+      const indexLines: string[] = ["# Code Index (file → symbols with line numbers)"];
+      for (const entry of codeIndex) {
+        const symbols: string[] = [];
+        for (const exp of entry.exports) {
+          symbols.push(`  - ${exp.kind} ${exp.name} (L${exp.line})`);
+        }
+        for (const fn of entry.functions) {
+          if (!entry.exports.some((e) => e.name === fn.name)) {
+            symbols.push(`  - function ${fn.name} (L${fn.startLine}-L${fn.endLine})`);
+          }
+        }
+        if (symbols.length > 0) {
+          indexLines.push(`\n## ${entry.file}`);
+          indexLines.push(...symbols);
+        }
+      }
+      parts.push(indexLines.join("\n"));
+    }
+  } catch {
+    // No code index — older analysis, fall through
+  }
+
   // Load overview
   try {
     const overview = await readFile(

@@ -99,14 +99,18 @@ export async function runAnalyze(
   const spinner3 = ora("Generating documentation...").start();
 
   try {
-    // Generate specialist docs in parallel
+    // Generate specialist docs in parallel (with structure data for code index)
     const docPromises = analysis.clusters.map((cluster) => {
       const analysisContent = clusterAnalyses.get(cluster.name) || "";
+      const clusterStructures = analysis.structures.filter((s) =>
+        cluster.files.includes(s.path)
+      );
       return generateSpecialistDocs(
         scribePath,
         cluster,
         analysisContent,
-        analysis.files
+        analysis.files,
+        clusterStructures
       );
     });
     await Promise.all(docPromises);

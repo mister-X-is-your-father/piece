@@ -278,12 +278,35 @@ async function loadSpecialistList(scribePath: string): Promise<string> {
     const raw = await readFile(join(scribePath, "_global-index.json"), "utf-8");
     const index: GlobalIndex = JSON.parse(raw);
 
-    return Object.entries(index.specialists)
-      .map(
-        ([name, info]) =>
-          `- **${name}**: ${info.description}\n  Keywords: ${info.keywords.slice(0, 15).join(", ")}\n  Files: ${info.files.slice(0, 5).join(", ")}`
-      )
-      .join("\n\n");
+    const entries: string[] = [];
+    for (const [name, info] of Object.entries(index.specialists)) {
+      let entry = `- **${name}**: ${info.description}\n  Keywords: ${info.keywords.slice(0, 15).join(", ")}\n  Files: ${info.files.slice(0, 5).join(", ")}`;
+
+      // Load code index to show key exports (helps routing accuracy)
+      try {
+        const codeIndexRaw = await readFile(
+          join(scribePath, "specialists", name, "_code-index.json"),
+          "utf-8"
+        );
+        const codeIndex = JSON.parse(codeIndexRaw) as Array<{
+          file: string;
+          exports: { name: string; kind: string; line: number }[];
+        }>;
+        const keyExports = codeIndex
+          .flatMap((e) => e.exports.filter((x) => x.kind === "class" || x.kind === "function" || x.kind === "interface"))
+          .slice(0, 10)
+          .map((e) => `${e.kind}:${e.name}`);
+        if (keyExports.length > 0) {
+          entry += `\n  Key exports: ${keyExports.join(", ")}`;
+        }
+      } catch {
+        // No code index
+      }
+
+      entries.push(entry);
+    }
+
+    return entries.join("\n\n");
   } catch {
     return "No specialists available.";
   }

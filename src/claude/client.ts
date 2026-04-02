@@ -64,7 +64,7 @@ async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
       [
         "-p", "-",            // read prompt from stdin
         "--output-format", "json",
-        "--max-turns", "1",
+        "--max-turns", "10",
       ],
       {
         stdio: ["pipe", "pipe", "pipe"],
@@ -99,7 +99,8 @@ async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
         const parsed = JSON.parse(stdout) as ClaudeCliResult;
 
         if (parsed.is_error) {
-          reject(new Error(`Claude Code error: ${parsed.result}`));
+          const errorDetail = parsed.result || parsed.subtype || "unknown error";
+          reject(new Error(`Claude Code error: ${errorDetail}`));
           return;
         }
 

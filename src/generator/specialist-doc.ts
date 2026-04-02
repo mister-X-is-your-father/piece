@@ -1,8 +1,18 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Cluster, DomainJson, FileEntry } from "../config/schema.js";
+import type { Cluster, DomainJson, FileEntry, FileStructure } from "../config/schema.js";
 import { renderMarkdown, sanitizeFilename, type DocFrontmatter } from "./renderer.js";
 import { logger } from "../utils/logger.js";
+
+/**
+ * Code index entry: maps file → symbols with line numbers.
+ * Inspired by cAST (AST-based chunking for RAG) and Aider's repo-map.
+ */
+export interface CodeIndexEntry {
+  file: string;
+  exports: { name: string; kind: string; line: number }[];
+  functions: { name: string; startLine: number; endLine: number }[];
+}
 
 /**
  * Generate specialist documentation from analysis results.
@@ -12,7 +22,8 @@ export async function generateSpecialistDocs(
   scribePath: string,
   cluster: Cluster,
   analysisContent: string,
-  fileEntries: FileEntry[]
+  fileEntries: FileEntry[],
+  structures?: FileStructure[]
 ): Promise<void> {
   const specialistDir = join(scribePath, "specialists", cluster.name);
   const filesDir = join(specialistDir, "files");
@@ -85,6 +96,17 @@ export async function generateSpecialistDocs(
     "utf-8"
   );
 
+  // 5. Write code index (file → symbols with line numbers)
+  // This gives specialists concrete file paths, class/function names, and line numbers to cite
+  if (structures && structures.length > 0) {
+    const codeIndex = buildCodeIndex(structures);
+    await writeFile(
+      join(specialistDir, "_code-index.json"),
+      JSON.stringify(codeIndex, null, 2),
+      "utf-8"
+    );
+  }
+
   logger.debug(`Generated specialist docs for: ${cluster.name}`);
 }
 
@@ -137,4 +159,23 @@ function buildSearchIndex(
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build a code index from parsed file structures.
+ * Maps each file to its exported symbols and functions with line numbers.
+ * This enables specialists to cite exact file:line references when answering.
+ */
+function buildCodeIndex(structures: FileStructure[]): CodeIndexEntry[] {
+  return structures
+    .map((s) => ({
+      file: s.path,
+      exports: s.exports.map((e) => ({ name: e.name, kind: e.kind, line: e.line })),
+      functions: s.functions.map((f) => ({
+        name: f.name,
+        startLine: f.startLine,
+        endLine: f.endLine,
+      })),
+    }))
+    .filter((entry) => entry.exports.length > 0 || entry.functions.length > 0);
 }

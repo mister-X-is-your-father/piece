@@ -4,6 +4,75 @@
 
 ---
 
+## Session 2026-04-02-6
+
+### 診断結果
+- 今回のギャップ: ファイル正確性(5.7/15)、根拠の具体性(2.3/15)、回答の実質性(2.5/10)、フロー追跡(2.5/10)
+- 前回からの変化: S5でファクトチェック復活(0→15)、速度10/10維持。残る大ギャップは分析品質起因
+- 共通の根本原因: 分析(analyze)フェーズで抽出した構造情報(関数名・行番号)がspecialist docsに保存されず、回答時に失われている
+
+### リサーチ
+- 調査テーマ: コード構造抽出とRAGにおけるAST-based indexing（前回「RAG citation生成」とは別の構造的アプローチ）
+- 発見した知見:
+  - cAST (2025): AST-based chunking → Recall@5 +4.3, 構文単位でチャンク境界を揃える
+  - Citation-Grounded Code Comprehension: AST解析でfunction/class/methodを抽出し*_index.jsonに保存、機械的検証でハルシネーション防止
+  - Aider's repo-map: シンボルレベルのリポジトリマップ → 最小トークン消費(4.3-6.5%)で最高精度、embeddingなし
+  - 核心: 「LLMは見たことのないコードを引用できない」→ specialist contextに構造メタデータを含める
+- 採用判断: Code Index方式を採用。PIECEのparserが既に抽出済みの構造データ(functions, exports, line numbers)を`_code-index.json`として保存し、specialist回答コンテキストに注入
+
+### 実施内容
+- 変更ファイル: specialist-doc.ts, specialist.ts, prompts/specialist.ts, manager.ts, analyze.ts, agent-runner.ts, client.ts
+- 何をしたか:
+  1. **Code Index生成**: `generateSpecialistDocs`にFileStructure[]を渡し、`_code-index.json`(file→exports→functions→line numbers)を生成
+  2. **Code Index注入**: specialist回答時にcode indexをドキュメントの先頭に配置。具体的なファイルパス・クラス名・関数名・行番号をspecialistが参照可能に
+  3. **プロンプト強化**: Code Indexの活用指示、フロー質問検出（isFlowQuestion）で番号付きステップを強制要求、「Related」セクション必須化
+  4. **Manager routing強化**: specialist listにkey exports(class/function/interface)を追加。ルーティング精度向上
+  5. **Agent Runner耐障害性**: Promise.allで1つ失敗→全滅を修正。個別タスク失敗時はフォールバック空応答を返す
+  6. **Claude CLI修正**: max-turns 1→10（ツール使用でターン消費する問題）、エラー詳細にsubtypeを含める
+- なぜそうしたか:
+  - 根拠の具体性(2.3/15)の根本原因は「specialistがファイルパス・行番号を知らない」。Code Indexで解決
+  - フロー追跡(2.5/10)は質問タイプ検出+専用指示で改善可能
+  - Agent Runnerの全滅バグは実運用上のクリティカルバグ
+
+### 結果
+- ビルド: OK
+- テスト: 18/18パス
+- ベンチマーク: **16/100** (ただし全20specialist分析がrate limitで失敗。空のspecialist docsでの結果であり、コード改善の効果は未測定)
+  - ファクトチェック: 0/15 (specialist docsが空のためcitationなし)
+  - ファイル正確性: 3.1/15
+  - 用語網羅性: 4.2/10
+  - 根拠の具体性: 2.3/15
+  - 回答の実質性: 1.3/10
+  - 誠実性: 5/10
+  - フロー追跡: 0/10
+  - 提案力: 0/5
+  - 応答速度: 0/10
+- うまくいったこと:
+  - Code Index生成が正常動作（全specialistに_code-index.json生成確認済み）
+  - Agent Runner耐障害性修正により、20 specialist中20失敗でも分析完了
+  - Claude CLI max-turns修正でerror_max_turns問題解消
+  - フロー質問検出ロジック実装
+- うまくいかなかったこと:
+  - **Rate limit**: 20 concurrent Claude CLI呼び出しで即座にrate limitヒット。3タスクしか成功せず
+  - ベンチマーク中の15 ask呼び出しも各90-115秒（rate limit回復待ち含む）で速度0/10
+  - specialist分析が全滅したため、Code Index以外のdocs(overview.md)が空。改善効果を正しく測定できなかった
+  - 前回S5の64点と比較不能（分析品質の問題ではなくインフラの問題）
+- 残課題:
+  - Rate limitのない環境で再ベンチマーク（正しい分析結果でCode Indexの効果を測定）
+  - concurrency設定の最適化（3→1-2に下げてrate limit回避？）
+  - APIバックエンド対応（Claude Code CLIではなく直接API呼び出しでrate limit制御）
+
+### 次回への申し送り
+- 最優先: **Rate limitのない環境で再分析+再ベンチマーク**。Code Indexの効果は実装済みだが未測定
+- 次点: concurrencyを1に下げてrate limit回避、または分析をバッチ分割
+- リサーチ候補: "LLM rate limit management" / "batch API processing" / "query decomposition for better term coverage"
+- 注意事項:
+  - max-turns=1はClaude Code CLI v4.xで壊れる（ツール使用でターン消費）。10に設定済み
+  - Agent Runnerの全滅バグは修正済み。ただしフォールバック空応答はspecialist docs品質を下げる
+  - ベンチマーク前回スコア: S5=**64/100**（今回16は分析失敗のためベースライン比較無効）
+
+---
+
 ## Session 2026-04-02-1
 
 ### 診断結果

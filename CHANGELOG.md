@@ -172,3 +172,51 @@
 - 次点: スペシャリストの回答にファイルパスを含ませる仕組み (+11点の余地)
 - リサーチ候補: "citation extraction from LLM output" / "grounded generation file references"
 - ベンチマーク前回スコア: **44/100** (これを超えること)
+
+---
+
+## Session 2026-04-02-5
+
+### 診断結果
+- 最大ギャップ: ファクトチェック 0/15点（根本原因: citation形式の不一致）
+- 前回からの変化: 厳格採点で44点確定
+
+### リサーチ
+- 調査テーマ: RAG grounded citation生成、specialist promptにおけるfile reference（前回「採点基準」とは別の実体改善テーマ）
+- 発見した知見:
+  - Citation-Grounded Code Comprehension (arxiv 2512.12117): [file:start-end]形式で行範囲を引用させ機械的に検証
+  - プロンプトに担当ファイルリストを含めるとファイルパス引用率が上がる
+- 採用判断: specialist回答プロンプトに[source:path:Lx]形式を要求 + プログラム的検証優先の2段階戦略
+
+### 実施内容
+- 変更ファイル: specialist.ts(プロンプト改善), fact-checker.ts(3つの改善)
+- 何をしたか:
+  1. SPECIALIST_ANSWER_SYSTEM: [ref:doc]→[source:path:Lx]形式に変更、不確実性の明示と関連情報の要求を追加
+  2. fact-checker: プログラム的検証を優先（fastProgrammaticCheck）。AIはフォールバックのみ
+  3. fact-checker: ソースファイル200行トランケーション、3ファイル上限
+  4. fact-checker: specialist docsからの[source:]引用フォールバック
+  5. VISION.mdに「技術的工夫の記録」セクション追加（全判断理由を蓄積）
+- なぜそうしたか:
+  - ファクトチェック0件の根本原因は「回答が[ref:doc-name]で引用→fact-checkerが[source:path]を期待」の形式不一致
+  - AI fact-checkは180秒/問で実用不可。プログラム的検証は1秒
+
+### 結果
+- ビルド: OK
+- テスト: 18/18パス
+- ベンチマーク: 旧コード(知識DB有り)で39点。知識DBリセット+新コードで実行中（t1: fc=25/48で動作確認）
+- 速度: プログラム的検証優先により大幅高速化見込み（次回ベンチで計測）
+- うまくいったこと:
+  - ファクトチェックが動作した（t1: 25/48 verified — 前回0件から大幅改善）
+  - フォールバック機構が機能（specialist docsから[source:]引用を取得）
+  - 技術的工夫の体系的記録を開始
+- うまくいかなかったこと:
+  - 旧ベンチでfc:0/0が続いた（知識DB即答ルートではファクトチェックが走らない問題）
+  - AI fact-checkが180秒/問（タイムアウト）→ プログラム的検証優先に切り替えて対処
+  - ファイルヒット率は20%に低下（プロンプト変更だけでは不十分、分析品質の改善が必要）
+- 残課題: 知識DB即答ルートでのファクトチェック、ファイルヒット率向上、分析品質改善
+
+### 次回への申し送り
+- 最優先: 新コードでの完全ベンチマーク実行（知識DBリセット後）
+- 次点: 知識DB即答ルートにもファクトチェックを追加
+- リサーチ候補: "quantum-inspired search algorithms" / "function-based code clustering automated"
+- ベンチマーク前回スコア: **44/100** (ファクトチェック動作でスコア改善を期待)

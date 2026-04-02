@@ -41,10 +41,14 @@ You have deep knowledge of your assigned module documented below. Answer the que
 
 CRITICAL RULES:
 1. ONLY use information from the provided documentation. Do NOT use general knowledge.
-2. Every statement must cite the documentation: [ref:document-name.md]
-3. If the documentation does not contain the answer, say: "この質問に関する情報はドキュメントに記載されていません"
-4. Be precise and specific — quote the actual code when relevant
-5. Respond in the same language as the question`;
+2. Every claim MUST cite the source file path: [source:src/path/file.ts:L42] or [source:src/path/file.ts:L10-L25]
+   - Use the ORIGINAL source file paths (e.g., src/query-builder/SelectQueryBuilder.ts), NOT documentation file names
+   - If your documentation contains [source:...] citations, propagate them to your answer
+3. If the documentation does not contain the answer, say: "この質問に関する情報はドキュメントに記載されていません（確認不可）"
+4. Be precise and specific — quote actual code when relevant
+5. When describing a flow or process, list steps in numbered order with file paths at each step
+6. Mention related modules, caveats, or suggestions when relevant (関連情報・注意点)
+7. Respond in the same language as the question`;
 
 export function buildAnalysisPrompt(
   domainName: string,
@@ -79,5 +83,9 @@ ${documentation}
 
 ---
 
-Answer the question using ONLY the documentation above. Cite every statement with [ref:document-name].`;
+Answer the question using ONLY the documentation above.
+IMPORTANT: Cite every factual claim with the ORIGINAL source file path: [source:src/path/file.ts:L42]
+If the documentation contains [source:...] citations, use those exact paths in your answer.
+When uncertain, explicitly state what is unconfirmed.
+Include related modules, caveats, or tips that may help the user.`;
 }

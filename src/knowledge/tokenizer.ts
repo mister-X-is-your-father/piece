@@ -134,3 +134,108 @@ export function tokenizeQuery(text: string): {
 
   return { tokens, originalTerms };
 }
+
+// --- Query Preprocessing ---
+
+export interface PreprocessedQuery {
+  /** Normalized query (NFKC, lowered, whitespace-collapsed) */
+  normalized: string;
+  /** Quoted phrases extracted from query */
+  phrases: string[];
+  /** Negated terms (after - or NOT) */
+  negations: string[];
+  /** Must-include terms (after +) */
+  mustInclude: string[];
+  /** Fuzzy-corrected form (edit-distance=1 matches against vocabulary) */
+  corrected: string;
+}
+
+/**
+ * Preprocess a raw query into a structured form.
+ *
+ * - NFKC normalization (unifies fullwidth/halfwidth, 全角半角統一)
+ * - Phrase extraction: "exact" / 「完全一致」
+ * - Negation: -term / NOT term
+ * - Must-include: +term
+ * - Fuzzy correction against known vocabulary
+ */
+export function preprocessQuery(
+  raw: string,
+  vocabulary?: Set<string>
+): PreprocessedQuery {
+  // NFKC normalize (fullwidth → halfwidth, etc.)
+  let text = raw.normalize("NFKC");
+
+  // Extract quoted phrases
+  const phrases: string[] = [];
+  text = text.replace(/「([^」]+)」/g, (_, p) => { phrases.push(p); return " "; });
+  text = text.replace(/"([^"]+)"/g, (_, p) => { phrases.push(p); return " "; });
+
+  // Extract negations (-term / NOT term)
+  const negations: string[] = [];
+  text = text.replace(/\bNOT\s+(\S+)/gi, (_, t) => { negations.push(t.toLowerCase()); return " "; });
+  text = text.replace(/(?:^|\s)-(\S+)/g, (_, t) => { negations.push(t.toLowerCase()); return " "; });
+
+  // Extract must-include (+term)
+  const mustInclude: string[] = [];
+  text = text.replace(/(?:^|\s)\+(\S+)/g, (_, t) => { mustInclude.push(t.toLowerCase()); return " "; });
+
+  // Normalize: lowercase, collapse whitespace
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+
+  // Fuzzy correction: for each English word, check edit-distance=1 against vocabulary
+  let corrected = normalized;
+  if (vocabulary && vocabulary.size > 0) {
+    const words = normalized.split(/\s+/);
+    const correctedWords = words.map((word) => {
+      if (word.length < 3 || isJapanese(word[0])) return word;
+      if (vocabulary.has(word)) return word;
+      // Generate edit-distance=1 candidates
+      const candidate = findClosestWord(word, vocabulary);
+      return candidate ?? word;
+    });
+    corrected = correctedWords.join(" ");
+  }
+
+  return { normalized, phrases, negations, mustInclude, corrected };
+}
+
+/**
+ * Find the closest word in vocabulary by Damerau-Levenshtein distance = 1.
+ */
+function findClosestWord(word: string, vocabulary: Set<string>): string | null {
+  const candidates = generateEditDistance1(word);
+  for (const c of candidates) {
+    if (vocabulary.has(c)) return c;
+  }
+  return null;
+}
+
+/**
+ * Generate all strings at edit distance 1 (deletion, insertion, substitution, transposition).
+ */
+function generateEditDistance1(word: string): string[] {
+  const results: string[] = [];
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789_";
+
+  for (let i = 0; i < word.length; i++) {
+    // Deletion
+    results.push(word.slice(0, i) + word.slice(i + 1));
+    // Substitution
+    for (const c of chars) {
+      if (c !== word[i]) results.push(word.slice(0, i) + c + word.slice(i + 1));
+    }
+    // Transposition
+    if (i < word.length - 1) {
+      results.push(word.slice(0, i) + word[i + 1] + word[i] + word.slice(i + 2));
+    }
+  }
+  // Insertion
+  for (let i = 0; i <= word.length; i++) {
+    for (const c of chars) {
+      results.push(word.slice(0, i) + c + word.slice(i));
+    }
+  }
+
+  return results;
+}

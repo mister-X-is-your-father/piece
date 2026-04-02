@@ -480,6 +480,20 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 9,
+    sql: `
+      -- LSH buckets for approximate nearest neighbor vector search
+      CREATE TABLE IF NOT EXISTS embedding_buckets (
+        node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+        bucket_id INTEGER NOT NULL,
+        plane_set INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(node_id, plane_set)
+      );
+      CREATE INDEX IF NOT EXISTS idx_embedding_buckets_lookup
+        ON embedding_buckets(plane_set, bucket_id);
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

@@ -32,8 +32,9 @@
  */
 
 import type Database from "better-sqlite3";
-import { synapseSearch, type ActivatedNode } from "./neuron.js";
-import { tokenizeQuery } from "./tokenizer.js";
+import { synapseSearch } from "./neuron.js";
+import { tokenizeQuery, preprocessQuery, type PreprocessedQuery } from "./tokenizer.js";
+import { vectorSearchANN } from "./embeddings.js";
 
 // --- Strategy Interface (プラグイン拡張可能) ---
 
@@ -135,46 +136,92 @@ const structuralStrategy: SearchStrategy = {
   },
 };
 
-/** 3. Temporal: recently accessed/created nodes */
+/** 3. Temporal: recently accessed/created nodes (query-aware + log decay) */
 const temporalStrategy: SearchStrategy = {
   name: "temporal",
-  description: "Prioritize recently accessed or created knowledge",
+  description: "Prioritize recently accessed or created knowledge relevant to query",
   weight: 0.4,
   search(db, query, limit) {
-    // Recently accessed nodes (weighted by recency)
+    const { tokens } = tokenizeQuery(query);
+    if (tokens.length === 0) return [];
+
+    const tokenList = tokens.map((t) => t.token);
+    const placeholders = tokenList.map(() => "?").join(",");
+
+    // Query-relevant nodes with recency + confidence weighting
     const recent = db
       .prepare(
-        `SELECT id, summary,
-                julianday('now') - julianday(COALESCE(last_accessed_at, created_at)) as days_ago
-         FROM knowledge_nodes
-         WHERE last_accessed_at IS NOT NULL OR created_at > datetime('now', '-7 days')
-         ORDER BY COALESCE(last_accessed_at, created_at) DESC
+        `SELECT kn.id, kn.confidence,
+                julianday('now') - julianday(COALESCE(kn.last_accessed_at, kn.created_at)) as days_ago
+         FROM knowledge_nodes kn
+         INNER JOIN node_tokens nt ON nt.node_id = kn.id
+         WHERE nt.token IN (${placeholders})
+           AND (kn.last_accessed_at IS NOT NULL OR kn.created_at > datetime('now', '-30 days'))
+         GROUP BY kn.id
+         ORDER BY COALESCE(kn.last_accessed_at, kn.created_at) DESC
          LIMIT ?`
       )
-      .all(limit) as Array<{ id: string; summary: string; days_ago: number }>;
+      .all(...tokenList, limit) as Array<{ id: string; confidence: number; days_ago: number }>;
 
     return recent.map((r) => ({
       nodeId: r.id,
-      score: Math.max(0.1, 3.0 - r.days_ago * 0.3), // decay over days
+      score: Math.max(0.1, (3.0 / (1 + Math.log1p(r.days_ago))) * r.confidence),
       strategy: "temporal",
-      reason: `${r.days_ago.toFixed(1)} days ago`,
+      reason: `${r.days_ago.toFixed(1)}d ago, conf:${r.confidence.toFixed(2)}`,
     }));
   },
 };
 
-/** 4. Graph Walk: expand from known hits through links */
+/** Link type weights for graph walk scoring */
+const LINK_TYPE_WEIGHTS: Record<string, number> = {
+  depends_on: 1.5,
+  elaborates: 1.5,
+  resolves: 1.3,
+  related: 1.0,
+  contradicts: 0.3,
+};
+
+/** 4. Graph Walk: expand from vector seeds through links (2-hop, orthogonal to synapse) */
 const graphWalkStrategy: SearchStrategy = {
   name: "graph_walk",
-  description: "Explore neighbors of matched nodes through knowledge graph",
+  description: "2-hop graph exploration from vector-seeded nodes (semantic→structural axis)",
   weight: 0.6,
   search(db, query, limit) {
-    // First get synapse results as seeds
-    const seeds = synapseSearch(db, query, { limit: 5, maxDepth: 0 }); // no spreading, just direct hits
-    const results: StrategyResult[] = [];
-    const seen = new Set(seeds.map((s) => s.nodeId));
+    // Seed from vector results (semantic axis, orthogonal to synapse's lexical axis)
+    let seedIds: Array<{ nodeId: string; score: number }> = [];
 
-    for (const seed of seeds) {
-      // Get neighbors
+    try {
+      const cached = db
+        .prepare("SELECT vector FROM _query_vector LIMIT 1")
+        .get() as { vector: Buffer } | undefined;
+      if (cached) {
+        const queryVec = new Float32Array(
+          cached.vector.buffer,
+          cached.vector.byteOffset,
+          cached.vector.byteLength / 4
+        );
+        const vectorResults = vectorSearchANN(db, queryVec, 5);
+        seedIds = vectorResults.map((r) => ({ nodeId: r.nodeId, score: r.similarity * 10 }));
+      }
+    } catch {
+      // vector not available
+    }
+
+    // Fallback: use structural matches if no vector seeds
+    if (seedIds.length === 0) {
+      const synapse = synapseSearch(db, query, { limit: 5, maxDepth: 0 });
+      seedIds = synapse.map((s) => ({ nodeId: s.nodeId, score: s.activation }));
+    }
+
+    if (seedIds.length === 0) return [];
+
+    const results: StrategyResult[] = [];
+    const seen = new Set(seedIds.map((s) => s.nodeId));
+
+    // Hop 1: direct neighbors
+    const hop1Nodes: Array<{ nodeId: string; score: number; fromId: string }> = [];
+
+    for (const seed of seedIds) {
       const neighbors = db
         .prepare(
           `SELECT
@@ -192,20 +239,55 @@ const graphWalkStrategy: SearchStrategy = {
       for (const n of neighbors) {
         if (seen.has(n.neighbor_id)) continue;
         seen.add(n.neighbor_id);
+        const linkWeight = LINK_TYPE_WEIGHTS[n.link_type] ?? 1.0;
+        const score = seed.score * 0.5 * (n.weight || 1.0) * linkWeight;
+        hop1Nodes.push({ nodeId: n.neighbor_id, score, fromId: seed.nodeId });
         results.push({
           nodeId: n.neighbor_id,
-          score: seed.activation * 0.3 * (n.weight || 1.0),
+          score,
           strategy: "graph_walk",
-          reason: `via ${seed.nodeId.slice(0, 8)} [${n.link_type}]`,
+          reason: `hop1 via ${seed.nodeId.slice(0, 8)} [${n.link_type}]`,
         });
       }
     }
 
-    return results.slice(0, limit);
+    // Hop 2: neighbors of hop-1 nodes (top 5 only to limit expansion)
+    const hop1Top = hop1Nodes.sort((a, b) => b.score - a.score).slice(0, 5);
+    for (const h1 of hop1Top) {
+      const neighbors = db
+        .prepare(
+          `SELECT
+             CASE WHEN source_id = ? THEN target_id ELSE source_id END as neighbor_id,
+             weight, link_type
+           FROM node_links
+           WHERE source_id = ? OR target_id = ?
+           LIMIT 5`
+        )
+        .all(h1.nodeId, h1.nodeId, h1.nodeId) as Array<{
+        neighbor_id: string;
+        weight: number;
+        link_type: string;
+      }>;
+
+      for (const n of neighbors) {
+        if (seen.has(n.neighbor_id)) continue;
+        seen.add(n.neighbor_id);
+        const linkWeight = LINK_TYPE_WEIGHTS[n.link_type] ?? 1.0;
+        const score = h1.score * 0.5 * (n.weight || 1.0) * linkWeight;
+        results.push({
+          nodeId: n.neighbor_id,
+          score,
+          strategy: "graph_walk",
+          reason: `hop2 via ${h1.nodeId.slice(0, 8)} [${n.link_type}]`,
+        });
+      }
+    }
+
+    return results.sort((a, b) => b.score - a.score).slice(0, limit);
   },
 };
 
-/** 5. Tag Cluster: Jaccard similarity on tag sets */
+/** 5. Tag Cluster: Jaccard similarity on tag sets (inverted index) */
 const tagClusterStrategy: SearchStrategy = {
   name: "tag_cluster",
   description: "Find nodes with similar tag sets using Jaccard similarity",
@@ -216,26 +298,27 @@ const tagClusterStrategy: SearchStrategy = {
 
     if (queryTags.size === 0) return [];
 
-    // Get all unique node_ids with their tags
-    const rows = db
+    // Inverted index approach: find only candidate nodes that have at least one matching tag
+    const tagArray = [...queryTags];
+    const placeholders = tagArray.map(() => "?").join(",");
+
+    const candidates = db
       .prepare(
-        `SELECT nt.node_id, GROUP_CONCAT(nt.tag) as tags
+        `SELECT nt.node_id,
+                COUNT(*) as match_count,
+                (SELECT COUNT(*) FROM node_tags nt2 WHERE nt2.node_id = nt.node_id) as total_tags
          FROM node_tags nt
-         GROUP BY nt.node_id`
+         WHERE LOWER(nt.tag) IN (${placeholders})
+         GROUP BY nt.node_id
+         LIMIT ?`
       )
-      .all() as Array<{ node_id: string; tags: string }>;
+      .all(...tagArray, limit * 3) as Array<{ node_id: string; match_count: number; total_tags: number }>;
 
     const results: StrategyResult[] = [];
 
-    for (const row of rows) {
-      const nodeTags = new Set(row.tags.split(",").map((t) => t.toLowerCase()));
-
-      // Jaccard similarity
-      let intersection = 0;
-      for (const t of queryTags) {
-        if (nodeTags.has(t)) intersection++;
-      }
-      const union = queryTags.size + nodeTags.size - intersection;
+    for (const row of candidates) {
+      const intersection = row.match_count;
+      const union = queryTags.size + row.total_tags - intersection;
       const jaccard = union > 0 ? intersection / union : 0;
 
       if (jaccard > 0) {
@@ -252,10 +335,10 @@ const tagClusterStrategy: SearchStrategy = {
   },
 };
 
-/** 6. Vector: semantic similarity via embeddings */
+/** 6. Vector: semantic similarity via embeddings (LSH-ANN accelerated) */
 const vectorStrategy: SearchStrategy = {
   name: "vector",
-  description: "Semantic similarity search via local embeddings (all-MiniLM-L6-v2)",
+  description: "Semantic similarity search via local embeddings with LSH-ANN acceleration",
   weight: 1.2, // highest weight — semantic understanding is powerful
   search(db, query, limit) {
     // Check if embeddings table has data
@@ -269,8 +352,6 @@ const vectorStrategy: SearchStrategy = {
     }
 
     // Synchronous vector search using pre-computed query embedding
-    // Note: The actual embedding is done async before calling multi-strategy
-    // Here we check if a cached query vector exists in a temp table
     try {
       const cached = db
         .prepare("SELECT vector FROM _query_vector LIMIT 1")
@@ -283,32 +364,15 @@ const vectorStrategy: SearchStrategy = {
         cached.vector.byteLength / 4
       );
 
-      const rows = db
-        .prepare("SELECT node_id, vector FROM embeddings")
-        .all() as Array<{ node_id: string; vector: Buffer }>;
+      // Use ANN search (falls back to brute force if buckets not populated)
+      const annResults = vectorSearchANN(db, queryVec, limit);
 
-      const results: StrategyResult[] = [];
-      for (const row of rows) {
-        const stored = new Float32Array(
-          row.vector.buffer,
-          row.vector.byteOffset,
-          row.vector.byteLength / 4
-        );
-        let dot = 0;
-        for (let i = 0; i < queryVec.length; i++) {
-          dot += queryVec[i] * stored[i];
-        }
-        if (dot > 0.3) {
-          results.push({
-            nodeId: row.node_id,
-            score: dot * 10, // scale to comparable range
-            strategy: "vector",
-            reason: `similarity: ${dot.toFixed(3)}`,
-          });
-        }
-      }
-
-      return results.sort((a, b) => b.score - a.score).slice(0, limit);
+      return annResults.map((r) => ({
+        nodeId: r.nodeId,
+        score: r.similarity * 10,
+        strategy: "vector",
+        reason: `similarity: ${r.similarity.toFixed(3)}`,
+      }));
     } catch {
       return [];
     }
@@ -327,14 +391,44 @@ const defaultStrategies: SearchStrategy[] = [
 ];
 
 /**
+ * Compute adaptive strategy weights from feedback data.
+ * Uses strategy_performance table to adjust weights based on helpfulness.
+ */
+function computeAdaptiveWeights(db: Database.Database): Map<string, number> {
+  const weights = new Map<string, number>();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT strategy_name,
+                SUM(CASE WHEN was_helpful = 1 THEN 1 ELSE 0 END) as helpful,
+                COUNT(*) as total
+         FROM strategy_performance
+         GROUP BY strategy_name`
+      )
+      .all() as Array<{ strategy_name: string; helpful: number; total: number }>;
+
+    for (const row of rows) {
+      if (row.total >= 5) {
+        const helpfulRate = row.helpful / row.total;
+        weights.set(row.strategy_name, helpfulRate);
+      }
+    }
+  } catch {
+    // table might not exist yet
+  }
+  return weights;
+}
+
+/**
  * Run all strategies in parallel and merge results.
  *
  * 統合アルゴリズム:
- *   1. 各戦略を実行
- *   2. 全結果をnodeIdでグループ化
- *   3. 各nodeIdのスコア = Σ(strategy_score × strategy_weight)
- *   4. 複数戦略でヒットしたノードにボーナス（MECE交差ボーナス）
- *   5. ランキングして返却
+ *   1. 適応的重みを計算（フィードバックから学習）
+ *   2. 各戦略を実行
+ *   3. 全結果をnodeIdでグループ化
+ *   4. 各nodeIdのスコア = Σ(strategy_score × adaptive_weight)
+ *   5. 複数戦略でヒットしたノードにボーナス（MECE交差ボーナス）
+ *   6. MMR多様化してランキング返却
  */
 export function multiStrategySearch(
   db: Database.Database,
@@ -349,6 +443,22 @@ export function multiStrategySearch(
   const strategies = options.strategies ?? defaultStrategies;
   const minStrategies = options.minStrategies ?? 1;
 
+  // Query preprocessing: NFKC normalization, phrase/negation extraction, fuzzy correction
+  let vocabulary: Set<string> | undefined;
+  try {
+    const vocabRows = db
+      .prepare("SELECT DISTINCT token FROM node_tokens LIMIT 10000")
+      .all() as Array<{ token: string }>;
+    vocabulary = new Set(vocabRows.map((r) => r.token));
+  } catch {
+    // node_tokens might not exist yet
+  }
+  const preprocessed = preprocessQuery(query, vocabulary);
+  const effectiveQuery = preprocessed.corrected || preprocessed.normalized || query;
+
+  // Compute adaptive weights from feedback history
+  const adaptiveRates = computeAdaptiveWeights(db);
+
   // Run all strategies
   const allResults = new Map<
     string,
@@ -357,11 +467,18 @@ export function multiStrategySearch(
 
   for (const strategy of strategies) {
     try {
-      const results = strategy.search(db, query, limit * 2);
+      // Apply adaptive weight: baseWeight * (0.5 + helpfulRate), clamped [0.2, 2.0]
+      const rate = adaptiveRates.get(strategy.name);
+      const effectiveWeight =
+        rate !== undefined
+          ? Math.min(2.0, Math.max(0.2, strategy.weight * (0.5 + rate)))
+          : strategy.weight;
+
+      const results = strategy.search(db, effectiveQuery, limit * 2);
 
       for (const r of results) {
         const existing = allResults.get(r.nodeId) || { totalScore: 0, hits: [] };
-        existing.totalScore += r.score * strategy.weight;
+        existing.totalScore += r.score * effectiveWeight;
         existing.hits.push({ name: r.strategy, score: r.score, reason: r.reason });
         allResults.set(r.nodeId, existing);
       }
@@ -370,8 +487,24 @@ export function multiStrategySearch(
     }
   }
 
+  // Filter out negated terms: remove nodes whose content matches negation tokens
+  if (preprocessed.negations.length > 0) {
+    for (const negTerm of preprocessed.negations) {
+      for (const [nodeId] of allResults) {
+        try {
+          const hasNeg = db
+            .prepare("SELECT 1 FROM node_tokens WHERE node_id = ? AND token = ? LIMIT 1")
+            .get(nodeId, negTerm);
+          if (hasNeg) allResults.delete(nodeId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   // Cross-strategy bonus: nodes found by multiple strategies get a boost
-  const results: MultiStrategyResult[] = [];
+  const ranked: MultiStrategyResult[] = [];
   for (const [nodeId, data] of allResults) {
     const strategyCount = data.hits.length;
     if (strategyCount < minStrategies) continue;
@@ -380,14 +513,54 @@ export function multiStrategySearch(
     const crossBonus = 1.0 + (strategyCount - 1) * 0.2;
     const finalScore = data.totalScore * crossBonus;
 
-    results.push({
+    ranked.push({
       nodeId,
       finalScore,
       strategies: data.hits,
     });
   }
 
-  return results.sort((a, b) => b.finalScore - a.finalScore).slice(0, limit);
+  ranked.sort((a, b) => b.finalScore - a.finalScore);
+
+  // MMR diversification: penalize nodes that overlap heavily with already-selected nodes
+  if (ranked.length <= 1) return ranked.slice(0, limit);
+
+  const selected: MultiStrategyResult[] = [ranked[0]];
+  const remaining = ranked.slice(1);
+
+  while (selected.length < limit && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const candidate = remaining[i];
+      const candidateStrategies = new Set(candidate.strategies.map((s) => s.name));
+
+      // Count how many selected nodes share 2+ strategies with this candidate
+      let overlapCount = 0;
+      for (const sel of selected) {
+        const selStrategies = new Set(sel.strategies.map((s) => s.name));
+        let shared = 0;
+        for (const s of candidateStrategies) {
+          if (selStrategies.has(s)) shared++;
+        }
+        if (shared >= 2) overlapCount++;
+      }
+
+      const diversityPenalty = Math.pow(0.9, overlapCount);
+      const adjustedScore = candidate.finalScore * diversityPenalty;
+
+      if (adjustedScore > bestScore) {
+        bestScore = adjustedScore;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(remaining[bestIdx]);
+    remaining.splice(bestIdx, 1);
+  }
+
+  return selected;
 }
 
 /**

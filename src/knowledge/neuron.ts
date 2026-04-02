@@ -272,6 +272,13 @@ export function indexNodeTokens(
     const tagLower = tag.toLowerCase();
     insertStmt.run(nodeId, tagLower, "tag", 5); // 5x weight for tags
   }
+
+  // Auto-grow concept mesh from tag co-occurrence and summary→tag links
+  try {
+    autoGrowConcepts(db, summary, tags);
+  } catch {
+    // concept_links table might not exist yet
+  }
 }
 
 // --- Hebbian Learning ---
@@ -370,6 +377,68 @@ export function seedConceptLinks(db: Database.Database): void {
     const [normA, normB] = a < b ? [a, b] : [b, a];
     insertStmt.run(generateId(), normA, normB);
   }
+}
+
+// --- Auto Concept Growth ---
+
+/**
+ * Automatically create concept links from a node's tags and summary.
+ * Called during indexNodeTokens to organically grow the concept mesh.
+ *
+ * 1. Tag co-occurrence: two tags on the same node → concept link (weight 0.5)
+ * 2. Summary terms ↔ tags: English tokens from summary linked to tags (weight 0.3)
+ */
+export function autoGrowConcepts(
+  db: Database.Database,
+  summary: string,
+  tags: string[]
+): void {
+  if (tags.length < 1) return;
+
+  const insertOrStrength = db.prepare(
+    `INSERT INTO concept_links (id, term_a, term_b, weight, source)
+     VALUES (?, ?, ?, ?, 'co_occurrence')
+     ON CONFLICT(term_a, term_b)
+     DO UPDATE SET weight = MIN(weight + 0.05, 5.0), updated_at = datetime('now')`
+  );
+
+  const lowerTags = tags.map((t) => t.toLowerCase());
+
+  // 1. Tag co-occurrence links
+  for (let i = 0; i < lowerTags.length; i++) {
+    for (let j = i + 1; j < lowerTags.length; j++) {
+      const [a, b] = lowerTags[i] < lowerTags[j]
+        ? [lowerTags[i], lowerTags[j]]
+        : [lowerTags[j], lowerTags[i]];
+      insertOrStrength.run(generateId(), a, b, 0.5);
+    }
+  }
+
+  // 2. Summary English tokens ↔ tags
+  const summaryTokens = tokenize(summary)
+    .map((t) => t.token.toLowerCase())
+    .filter((t) => t.length >= 3 && !isJapaneseToken(t));
+
+  // Only link distinctive summary tokens (not already a tag)
+  const tagSet = new Set(lowerTags);
+  const distinctiveTokens = summaryTokens.filter((t) => !tagSet.has(t));
+
+  for (const token of distinctiveTokens.slice(0, 10)) {
+    for (const tag of lowerTags) {
+      const [a, b] = token < tag ? [token, tag] : [tag, token];
+      insertOrStrength.run(generateId(), a, b, 0.3);
+    }
+  }
+}
+
+function isJapaneseToken(token: string): boolean {
+  if (token.length === 0) return false;
+  const code = token.codePointAt(0)!;
+  return (
+    (code >= 0x3040 && code <= 0x309f) ||
+    (code >= 0x30a0 && code <= 0x30ff) ||
+    (code >= 0x4e00 && code <= 0x9fff)
+  );
 }
 
 // --- Reindex All Nodes ---

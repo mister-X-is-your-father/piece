@@ -115,6 +115,11 @@ export async function factCheckAnswer(
 
 /**
  * Extract unique file paths from all citation formats in the text.
+ * Supports multiple formats:
+ *   - [source:path:Lx]
+ *   - `src/path/file.ts`
+ *   - src/path/file.ts (plain text file paths)
+ *   - path/to/File.ts:123 (with line numbers)
  */
 function extractAllCitations(text: string): Set<string> {
   const files = new Set<string>();
@@ -126,11 +131,22 @@ function extractAllCitations(text: string): Set<string> {
     files.add(match[1]);
   }
 
-  // [ref:path] format (from specialist answers referencing doc files)
-  const refRegex = /\[ref:([^\]]+)\]/g;
-  while ((match = refRegex.exec(text)) !== null) {
-    // ref: points to doc files, try to extract source files from them
-    // This is handled by the AI fact checker
+  // Backtick-quoted file paths: `src/foo/bar.ts`
+  const backtickRegex = /`((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))`/g;
+  while ((match = backtickRegex.exec(text)) !== null) {
+    files.add(match[1]);
+  }
+
+  // Plain text file paths: src/foo/bar.ts or src/foo/bar.ts:123
+  const plainRegex = /(?:^|\s)((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))(?::\d+)?/gm;
+  while ((match = plainRegex.exec(text)) !== null) {
+    files.add(match[1]);
+  }
+
+  // Bold/markdown paths: **`src/foo.ts`** or *src/foo.ts*
+  const mdRegex = /\*{1,2}`?((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))`?\*{1,2}/g;
+  while ((match = mdRegex.exec(text)) !== null) {
+    files.add(match[1]);
   }
 
   return files;

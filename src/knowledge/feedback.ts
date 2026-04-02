@@ -231,7 +231,7 @@ export class FeedbackStore {
       }
     }
 
-    // 4. Record strategy performance
+    // 4. Record strategy performance (unhelpful strategies from search_issues)
     for (const issue of analysis.diagnosis.search_issues) {
       this.db
         .prepare(
@@ -239,6 +239,36 @@ export class FeedbackStore {
            VALUES (?, ?, ?, '[]', 0)`
         )
         .run(generateId(), feedbackEventId, issue.strategy);
+    }
+
+    // 5. Record helpful strategies (for positive feedback, rating >= 4)
+    const feedbackEvent = this.db
+      .prepare("SELECT rating FROM feedback_events WHERE id = ?")
+      .get(feedbackEventId) as { rating: number } | undefined;
+
+    if (feedbackEvent && feedbackEvent.rating >= 4) {
+      // All strategies that contributed nodes are considered helpful
+      const helpfulStrategies = new Set<string>();
+      for (const correction of analysis.corrections) {
+        if (correction.type === "update_node" || correction.type === "create_node") {
+          // These are corrections, not helpful — skip
+        }
+      }
+      // If no issues were reported, mark all known strategies as helpful
+      const issueStrategies = new Set(analysis.diagnosis.search_issues.map((i) => i.strategy));
+      for (const strategyName of ["synapse", "structural", "temporal", "graph_walk", "tag_cluster", "vector"]) {
+        if (!issueStrategies.has(strategyName)) {
+          helpfulStrategies.add(strategyName);
+        }
+      }
+      for (const strategyName of helpfulStrategies) {
+        this.db
+          .prepare(
+            `INSERT INTO strategy_performance (id, feedback_event_id, strategy_name, contributed_node_ids, was_helpful)
+             VALUES (?, ?, ?, '[]', 1)`
+          )
+          .run(generateId(), feedbackEventId, strategyName);
+      }
     }
 
     return result;

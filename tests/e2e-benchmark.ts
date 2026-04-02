@@ -24,13 +24,15 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 
 // --- Config ---
-const TARGET_PATH = process.argv[2] || "test-targets/typeorm";
-const QUESTION_SET = process.argv[3] || "typeorm";
+const TARGET_PATH = process.argv[2] || "test-targets/alovoa";
+const defaultQuestionSet = TARGET_PATH.includes("alovoa") ? "alovoa" : "typeorm";
+const QUESTION_SET = process.argv[3] || defaultQuestionSet;
 const SCRIBE_PATH = join(TARGET_PATH, ".scribe");
 
 // --- Auto-setup: clone test target if not present ---
 const TEST_TARGETS: Record<string, string> = {
   "test-targets/typeorm": "https://github.com/typeorm/typeorm.git",
+  "test-targets/alovoa": "https://github.com/Alovoa/alovoa.git",
 };
 
 function ensureTestTarget(targetPath: string): void {
@@ -68,6 +70,128 @@ interface BenchmarkQuestion {
 }
 
 const QUESTION_SETS: Record<string, BenchmarkQuestion[]> = {
+  alovoa: [
+    {
+      id: "a1",
+      question: "How does the user search/matching system work? What filters and sorting options are available?",
+      category: "spec",
+      expectedFiles: ["SearchService.java", "UserSearchRequest.java", "SearchDto.java"],
+      expectedTerms: ["search", "distance", "gender", "sort", "intention", "age", "filter"],
+      mustContainFacts: ["SearchService", "SORT_DISTANCE"],
+    },
+    {
+      id: "a2",
+      question: "How does user authentication work? What login methods are supported (email/password, OAuth2)?",
+      category: "flow",
+      expectedFiles: ["AuthService.java", "SecurityConfig.java", "AuthFilter.java", "AuthProvider.java"],
+      expectedTerms: ["auth", "oauth2", "login", "password", "security", "session", "remember"],
+      mustContainFacts: ["SecurityConfig", "AuthService"],
+    },
+    {
+      id: "a3",
+      question: "How does the user registration flow work? What validation is performed?",
+      category: "flow",
+      expectedFiles: ["RegisterService.java", "RegisterDto.java", "UserRegisterToken.java"],
+      expectedTerms: ["register", "email", "token", "password", "age", "validate", "confirm"],
+      mustContainFacts: ["RegisterService"],
+    },
+    {
+      id: "a4",
+      question: "How does the messaging/conversation system work? How are conversations created and messages sent?",
+      category: "flow",
+      expectedFiles: ["MessageService.java", "Conversation.java", "Message.java", "ConversationRepository.java"],
+      expectedTerms: ["message", "conversation", "send", "partner", "block", "convo"],
+      mustContainFacts: ["MessageService", "Conversation"],
+    },
+    {
+      id: "a5",
+      question: "How is the User entity structured? What are the main fields and relationships?",
+      category: "spec",
+      expectedFiles: ["User.java", "UserLike.java", "UserImage.java", "UserSettings.java"],
+      expectedTerms: ["entity", "email", "location", "gender", "intention", "profile", "image"],
+      mustContainFacts: ["User", "UserDetails"],
+    },
+    {
+      id: "a6",
+      question: "How does the like/match system work? What happens when two users like each other?",
+      category: "flow",
+      expectedFiles: ["UserService.java", "UserLike.java", "Conversation.java"],
+      expectedTerms: ["like", "match", "conversation", "notification", "mutual"],
+      mustContainFacts: ["UserLike"],
+    },
+    {
+      id: "a7",
+      question: "How does Spring Security configuration work in this project? What endpoints are public vs protected?",
+      category: "config",
+      expectedFiles: ["SecurityConfig.java", "AuthFilter.java", "AuthSuccessHandler.java"],
+      expectedTerms: ["security", "filter", "permit", "role", "admin", "csrf", "cors", "session"],
+      mustContainFacts: ["SecurityFilterChain", "ROLE_USER"],
+    },
+    {
+      id: "a8",
+      question: "How does the media handling system work? How are profile pictures and images stored and served?",
+      category: "spec",
+      expectedFiles: ["MediaService.java", "UserProfilePicture.java", "UserImage.java", "MediaController.java"],
+      expectedTerms: ["media", "image", "profile", "picture", "uuid", "webp", "byte"],
+      mustContainFacts: ["MediaService"],
+    },
+    {
+      id: "a9",
+      question: "How does the donation system work? What payment providers are integrated?",
+      category: "spec",
+      expectedFiles: ["DonateService.java", "DonationBmac.java", "DonationKofi.java", "UserDonation.java"],
+      expectedTerms: ["donate", "donation", "kofi", "bmac", "buymeacoffee", "payment"],
+      mustContainFacts: ["DonateService"],
+    },
+    {
+      id: "a10",
+      question: "How does the scheduled task system work? What cleanup jobs run periodically?",
+      category: "spec",
+      expectedFiles: ["ScheduleService.java", "CaptchaRepository.java", "UserHideRepository.java"],
+      expectedTerms: ["schedule", "captcha", "cleanup", "hide", "delay", "cron", "transactional"],
+      mustContainFacts: ["ScheduleService"],
+    },
+    {
+      id: "a11",
+      question: "How does the admin functionality work? What can administrators do?",
+      category: "spec",
+      expectedFiles: ["AdminService.java", "AdminController.java"],
+      expectedTerms: ["admin", "ban", "delete", "report", "user", "verification"],
+      mustContainFacts: ["AdminService"],
+    },
+    {
+      id: "a12",
+      question: "How does the captcha system work? How is it generated and verified?",
+      category: "flow",
+      expectedFiles: ["CaptchaService.java", "Captcha.java", "OxCaptcha.java", "CaptchaController.java"],
+      expectedTerms: ["captcha", "generate", "verify", "image", "token"],
+      mustContainFacts: ["CaptchaService"],
+    },
+    {
+      id: "a13",
+      question: "How does text encryption work? How is sensitive user data (email, name) encrypted?",
+      category: "spec",
+      expectedFiles: ["TextEncryptorConverter.java", "User.java"],
+      expectedTerms: ["encrypt", "converter", "key", "email", "sensitive", "attribute"],
+      mustContainFacts: ["TextEncryptorConverter"],
+    },
+    {
+      id: "a14",
+      question: "How does the internationalization (i18n) system work? How are translations managed?",
+      category: "config",
+      expectedFiles: ["messages.properties"],
+      expectedTerms: ["i18n", "message", "locale", "language", "translation", "properties"],
+      mustContainFacts: ["messages"],
+    },
+    {
+      id: "a15",
+      question: "How does the password reset flow work? What tokens are used and how are they validated?",
+      category: "flow",
+      expectedFiles: ["PasswordService.java", "UserPasswordToken.java", "PasswordController.java"],
+      expectedTerms: ["password", "reset", "token", "email", "change", "hash"],
+      mustContainFacts: ["PasswordService"],
+    },
+  ],
   typeorm: [
     {
       id: "t1",
@@ -246,7 +370,7 @@ function scoreAnswer(
   const fileHitRate = expected.expectedFiles.length > 0 ? fileHits / expected.expectedFiles.length : 0;
 
   // --- Detect lies: files referenced in answer that don't exist ---
-  const allFilePaths = answer.match(/(?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx)/g) || [];
+  const allFilePaths = answer.match(/(?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|properties|xml|html)/g) || [];
   const uniquePaths = [...new Set(allFilePaths)];
   let validCitationCount = 0;
   let fileMissCount = 0;
@@ -284,7 +408,7 @@ function scoreAnswer(
 
   // Validate line numbers against actual files
   let validLineNumbers = false;
-  const lineRefs = answer.match(/((?:src|lib)\/[\w\-./]+\.(?:ts|js)):(\d+)/g) || [];
+  const lineRefs = answer.match(/((?:src|lib)\/[\w\-./]+\.(?:ts|js|java)):(\d+)/g) || [];
   for (const ref of lineRefs) {
     const parts = ref.match(/(.*):(\d+)/);
     if (parts) {

@@ -45,20 +45,23 @@ Answer the question using ONLY the provided documentation and code index.
 
 CRITICAL RULES:
 1. ONLY use information from the provided documentation. Do NOT use general knowledge.
-2. Every claim MUST cite the source file path and line: [source:src/path/file.ts:L42] or [source:src/path/file.ts:L10-L25]
+2. Every claim MUST cite the source file path and line number in TWO ways:
+   a. Structured citation: [source:src/path/file.ts:L42] or [source:src/path/file.ts:L10-L25]
+   b. Inline reference: mention the file with line number naturally, e.g., \`src/path/file.ts:42\`
    - Use the ORIGINAL source file paths from the Code Index
    - Reference actual line numbers from the Code Index for classes, functions, and exports
    - If your documentation contains [source:...] citations, propagate them to your answer
 3. If the documentation does not contain the answer, say: "この質問に関する情報はドキュメントに記載されていません（確認不可）"
-4. Be precise and specific — mention actual class names, function names, and file paths
+4. Be precise and specific — mention actual class names, function names, and file paths by their full names (e.g., SearchService.java, SecurityConfig.java)
 5. When describing a flow or process:
    - ALWAYS list steps in numbered order (1. 2. 3. ...) with file paths at each step
    - Include at least 3 concrete steps showing the code path
    - Use → arrows between components when helpful
-6. Always include a "Related" section at the end with:
+6. Always include a "## Related" section at the end with:
    - Related modules or classes the user might want to explore
    - Caveats or gotchas (注意点)
    - Tips or suggestions for common use cases
+   - Note any limitations or uncertainties (「未確認」if applicable)
 7. Respond in the same language as the question`;
 
 export function buildAnalysisPrompt(
@@ -102,9 +105,10 @@ ${documentation}
 
 Answer the question using ONLY the documentation and code index above.
 IMPORTANT:
-- Cite every factual claim with the ORIGINAL source file path and line number: [source:src/path/file.ts:L42]
+- Cite every factual claim with BOTH: [source:src/path/file.ts:L42] AND inline \`src/path/file.ts:42\`
 - Use the Code Index to find exact file paths, class names, function names, and line numbers
+- Always mention file names fully (e.g., SearchService.java, SecurityConfig.java) — not just class names
 - If the documentation contains [source:...] citations, use those exact paths in your answer
 - When uncertain, explicitly state what is unconfirmed (「確認不可」「未確認」)
-- End with a "Related" or "Note" section containing related modules, caveats, or tips${flowInstruction}`;
+- End with a "## Related" section containing related modules, caveats (注意点), and tips${flowInstruction}`;
 }

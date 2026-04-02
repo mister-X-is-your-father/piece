@@ -4,6 +4,78 @@
 
 ---
 
+## Session 2026-04-02-7
+
+### 診断結果
+- 今回のギャップ: PIECEがJava/多言語プロジェクトに対応していない（パーサー、ファクトチェッカー、クラスタリング全て未対応）
+- 前回からの変化: S6のCode Index導入は正しい方向だったが、rate limit+CLI汚染で効果測定できず。今回は別環境で新ベンチマーク(alovoa/Java)を使用
+- 共通の根本原因: 全パイプラインがTypeScript/JSのみ想定で設計されていた
+
+### リサーチ
+- 調査テーマ: LLM code analysis prompt engineering for structured citations (2025-2026)
+- 発見した知見:
+  - "specify the goal to summarize with references to source chunks" パターンが有効
+  - Meta-prompting: structural scaffolds for code analysis tasks
+  - Citation-Grounded Code Comprehension: dual format (structured + inline) でhallucination防止
+- 採用判断: デュアル引用形式を採用 — `[source:path:L42]`(ファクトチェック用) + `` `path:42` ``(可読性+ベンチマーク整合性)
+
+### 実施内容
+- 変更ファイル: parser.ts, clusterer.ts, fact-checker.ts, prompts/specialist.ts, client.ts, .npmrc
+- 何をしたか:
+  1. **Java parser**: クラス/インタフェース/enum宣言抽出、メソッド抽出(visibility+return type+name)、import文解析。Code Indexに構造データ供給
+  2. **クラスタリング修正**: depth 3固定→depth 3〜10で動的分割。`src/main/java/com/org/app/service/`のような深い構造を正しくクラスタリング(2→12クラスタに改善)
+  3. **ファクトチェッカー多言語対応**: citation抽出regex全てに.java/.kt/.py/.go/.rs/.properties/.xml/.html追加。inline `path:42`形式の行番号検証追加
+  4. **CLI subprocess隔離**: cwd=/tmpに変更。PIECE自身のCLAUDE.md/hooks干渉を排除(分析内容がコミット提案に汚染される問題を解決)
+  5. **max-turns 10→25**: 大コンテキスト分析でのerror_max_turns回避
+  6. **npm出力抑制**: .npmrc loglevel=silent追加。`tsx src/index.ts`がベンチマークで「嘘」としてカウントされる問題を修正(-15点→-3点)
+  7. **specialist prompt強化**: デュアル引用形式の指示、フルファイル名使用の指示、"## Related"セクション必須化
+- なぜそうしたか:
+  - 新ベンチマーク(alovoa)がJavaプロジェクト。パーサー/ファクトチェッカーがJava未対応→全軸で大幅失点
+  - クラスタリングが2クラスタ=80K tokenコンテキストで大部分が切り捨て→12クラスタで適切なサイズに分割
+  - CLI汚染: specialist分析の出力にPIECEのコミット提案が混入→cwd隔離で解決
+  - npmヘッダー`src/index.ts`が全回答に1 lie加算→-15点→.npmrcで抑制
+
+### 結果
+- ビルド: OK
+- テスト: 18/18パス
+- **ベンチマーク(alovoa): 65/100** (初回ベースライン)
+  - ファクトチェック: 14.9/15 (ほぼ完璧!)
+  - ファイル正確性: 5.9/15 (タイムアウト2問でfile:0%が残る)
+  - 用語網羅性: 8/10
+  - 根拠の具体性: 11/15 (cite有効率96%、行番号検証動作)
+  - 回答の実質性: 8.1/10
+  - 誠実性: 5/10 (矛盾検出6件)
+  - フロー追跡: 6.7/10 (6問中4問で3+ステップ)
+  - 提案力: 5/5 (満点!)
+  - 応答速度: 0/10 (全問45秒超、大半120-180秒)
+- うまくいったこと:
+  - Java完全対応: パーサー→Code Index→specialist docs→回答→ファクトチェック→ベンチマーク全パイプライン動作
+  - ファクトチェック14.9/15: programmatic verification + inline path:42検証が安定動作
+  - 提案力5/5: "## Related"セクション指示が効果的
+  - 回答品質(term/fact/cite): タイムアウトしなかった10問では平均file:66%、term:90%、fact:88%
+  - CLI隔離: cwd=/tmpで分析品質が劇的改善(0 citation→平均100 citation/specialist)
+- うまくいかなかったこと:
+  - **速度0/10**: 全問45秒超。Manager delegation + Specialist answer + Fact-check = 3 sequential AI呼び出しで120-180秒
+  - **タイムアウト(a2, a4)**: 180秒以内に完了せず、file/term/fact全て0%
+  - **矛盾検出6件**: 同期/非同期の対比パターンがfalse positiveの可能性あり
+  - concurrency=2でも分析に20分以上（12クラスタ×3-5分/クラスタ）
+- 残課題:
+  - 速度改善: AI呼び出し数削減、またはManager+Specialist統合
+  - タイムアウト対策: 180秒以内に確実に応答
+  - 矛盾false positive削減
+
+### 次回への申し送り
+- 最優先: **速度改善**。現在0/10で10点分のギャップ。知識DBキャッシュ活用、AI呼び出し数削減、またはspecialist回答にfact-check結果を内蔵する方式
+- 次点: ファイル正確性改善（タイムアウト2問の解消で5.9→8+へ）
+- リサーチ候補: "single-pass RAG with inline verification" / "streaming code QA" / "lightweight fact-checking without AI call"
+- 注意事項:
+  - `.npmrc` loglevel=silent必須（削除するとlieが+15件/run増加）
+  - cwd=/tmp必須（CLIが親プロジェクトのCLAUDE.mdを読み込む問題）
+  - alovoa分析済み(.scribe/存在)。再分析不要
+  - ベンチマーク前回スコア: alovoa **65/100**（初回）
+
+---
+
 ## Session 2026-04-02-6
 
 ### 診断結果

@@ -64,11 +64,12 @@ async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
       [
         "-p", "-",            // read prompt from stdin
         "--output-format", "json",
-        "--max-turns", "10",
+        "--max-turns", "25",
       ],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env },
+        cwd: "/tmp",          // Isolate from PIECE repo (prevents CLAUDE.md/hooks interference)
       }
     );
 

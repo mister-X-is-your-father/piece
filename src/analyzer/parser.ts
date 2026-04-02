@@ -16,6 +16,10 @@ const TS_EXPORT_RE =
 const TS_FUNCTION_RE =
   /^(?:export\s+)?(?:async\s+)?(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=])\s*=>|(?:class\s+(\w+)))/gm;
 
+const JAVA_IMPORT_RE = /^import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;/gm;
+const JAVA_CLASS_RE = /^(?:\s*)(?:@\w+(?:\([^)]*\))?\s*)*(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum|@interface)\s+(\w+)/gm;
+const JAVA_METHOD_RE = /^(?:\s*)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:abstract\s+)?(?:<[\w<>,\s?]+>\s+)?(?:[\w<>\[\]?,\s]+)\s+(\w+)\s*\(/gm;
+
 const PY_FUNCTION_RE = /^(?:def|class)\s+(\w+)/gm;
 const GO_FUNCTION_RE = /^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)/gm;
 const RUST_FUNCTION_RE = /^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)/gm;
@@ -67,6 +71,23 @@ function extractImports(
         : [source];
       results.push({ source, names, line: lineNum });
     }
+  } else if (["java", "kt", "kts"].includes(ext)) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith("import ")) {
+        const importMatch = line.match(/^import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;/);
+        if (importMatch) {
+          const fullPath = importMatch[1];
+          const parts = fullPath.split(".");
+          const name = parts[parts.length - 1];
+          results.push({ source: fullPath, names: [name], line: i + 1 });
+        }
+      }
+      // Stop after package/import block
+      if (line.length > 0 && !line.startsWith("import ") && !line.startsWith("package ") && !line.startsWith("//") && !line.startsWith("/*") && !line.startsWith("*")) {
+        break;
+      }
+    }
   }
 
   return results;
@@ -78,6 +99,20 @@ function extractExports(
   ext: string
 ): ExportInfo[] {
   const results: ExportInfo[] = [];
+
+  if (["java", "kt", "kts"].includes(ext)) {
+    // Java: extract public classes, interfaces, enums, annotations
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Match class/interface/enum declarations (with optional annotations on preceding lines)
+      const classMatch = line.match(/^\s*(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:static\s+)?(class|interface|enum|@interface)\s+(\w+)/);
+      if (classMatch) {
+        const kind = classMatch[1] === "class" ? "class" : classMatch[1] === "interface" ? "interface" : "class";
+        results.push({ name: classMatch[2], line: i + 1, kind });
+      }
+    }
+    return results;
+  }
 
   if (!["ts", "tsx", "js", "jsx", "mjs", "cjs"].includes(ext)) return results;
 
@@ -123,6 +158,28 @@ function extractFunctions(
   ext: string
 ): FunctionInfo[] {
   const results: FunctionInfo[] = [];
+
+  // Java method extraction (special handling due to complex signatures)
+  if (["java", "kt", "kts"].includes(ext)) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Match method declarations: visibility [static] [final] ReturnType methodName(
+      // Exclude class/interface/enum declarations and constructors with 'new'
+      const methodMatch = line.match(/^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:abstract\s+)?(?:<[\w<>,\s?]+>\s+)?([\w<>\[\]?,\s]+)\s+(\w+)\s*\(/);
+      if (methodMatch) {
+        const returnType = methodMatch[1].trim();
+        const name = methodMatch[2];
+        // Skip if returnType is class/interface/enum (it's a declaration, not a method)
+        if (["class", "interface", "enum"].includes(returnType)) continue;
+        // Skip constructors (return type matches class name patterns)
+        if (name && name.length > 0) {
+          const endLine = findFunctionEnd(lines, i, ext);
+          results.push({ name, startLine: i + 1, endLine });
+        }
+      }
+    }
+    return results;
+  }
 
   const patterns: Record<string, RegExp> = {
     ts: TS_FUNCTION_RE,

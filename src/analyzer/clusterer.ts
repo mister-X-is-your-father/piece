@@ -160,6 +160,17 @@ function mergeSmallGroups(
   return result;
 }
 
+function splitByDepth(files: string[], depth: number): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const f of files) {
+    const parts = dirname(f).split("/");
+    const subKey = parts.length > depth ? parts.slice(0, depth).join("/") : parts.join("/");
+    if (!groups.has(subKey)) groups.set(subKey, []);
+    groups.get(subKey)!.push(f);
+  }
+  return groups;
+}
+
 function splitLargeGroups(
   groups: Map<string, string[]>,
   maxFiles: number
@@ -169,27 +180,38 @@ function splitLargeGroups(
   for (const [key, files] of groups) {
     if (files.length <= maxFiles) {
       result.set(key, files);
-    } else {
-      // Split into sub-groups by deeper directory
-      const subGroups = new Map<string, string[]>();
-      for (const f of files) {
-        const parts = f.split("/");
-        const subKey = parts.length > 2 ? parts.slice(0, 3).join("/") : key;
-        if (!subGroups.has(subKey)) subGroups.set(subKey, []);
-        subGroups.get(subKey)!.push(f);
-      }
+      continue;
+    }
 
-      if (subGroups.size > 1) {
-        for (const [sk, sf] of subGroups) {
-          result.set(sk, sf);
-        }
-      } else {
-        // Can't split further by directory, just chunk
-        const chunks = chunkArray(files, maxFiles);
-        chunks.forEach((chunk, i) => {
-          result.set(`${key}_part${i + 1}`, chunk);
-        });
+    // Try splitting by progressively deeper directory levels
+    // This handles deep structures like src/main/java/com/org/app/service/
+    let subGroups: Map<string, string[]> | null = null;
+    for (let depth = 3; depth <= 10; depth++) {
+      const candidate = splitByDepth(files, depth);
+      if (candidate.size > 1) {
+        subGroups = candidate;
+        break;
       }
+    }
+
+    if (subGroups && subGroups.size > 1) {
+      for (const [sk, sf] of subGroups) {
+        if (sf.length <= maxFiles) {
+          result.set(sk, sf);
+        } else {
+          // Still too large — chunk by maxFiles
+          const chunks = chunkArray(sf, maxFiles);
+          chunks.forEach((chunk, i) => {
+            result.set(`${sk}_part${i + 1}`, chunk);
+          });
+        }
+      }
+    } else {
+      // Can't split by directory at any depth, just chunk
+      const chunks = chunkArray(files, maxFiles);
+      chunks.forEach((chunk, i) => {
+        result.set(`${key}_part${i + 1}`, chunk);
+      });
     }
   }
 

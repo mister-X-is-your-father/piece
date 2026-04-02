@@ -170,6 +170,7 @@ PIECEはコードを書き換えるツールではない。
 | 2026-04-02 | S4 | 44/100 | 厳格採点導入。ベースライン確定 |
 | 2026-04-02 | S5 | 64/100 | ファクトチェック修復(0→15)、プログラム的検証優先、プロンプト改善 |
 | 2026-04-02 | S6 | 16/100* | Code Index導入、Agent Runner耐障害性、CLI修正。*全specialist分析がrate limitで失敗したため無効スコア |
+| 2026-04-02 | S7 | 65/100 | Java完全対応(parser+factcheck+clustering)、CLI隔離、alovoa初回ベンチマーク。FC14.9/15, 提案力5/5 |
 
 ---
 
@@ -390,6 +391,16 @@ PIECEはコードを書き換えるツールではない。
 | mustContainFacts | 「回答はしたけど核心が抜けてる」を検出。用語ヒットだけでは不十分 | 回答の実質性を測定 |
 | 基準凍結ルール | 採点方法を変えてスコアを上げる誘惑を断つ。経時比較の意味がなくなる | スコアの信頼性 |
 | テスト対象の自動clone | リモートトリガー(クラウド実行)に対応。毎回fresh環境でも動く | 自律改善ループが24/7動作 |
+
+### 多言語対応
+
+| 工夫 | なぜそうしたか | 効果 |
+|------|-------------|------|
+| Java parser (class/method/import抽出) | Code IndexがTS/JS前提→Java projectでCode Index空→specialist回答にクラス名・行番号なし | alovoa(Java 146ファイル)のCode Index生成成功。specialist docsに平均100 citation/specialist |
+| fact-checker regex多言語化 | citation抽出がts/jsのみ→Java引用を一切検出できず→FC0点 | FC14.9/15達成。.java/.properties/.xml等の引用を全て検出 |
+| inline path:42形式の検証 | [source:path:L42]はFCで検証可能だが、ベンチマークのvalidLineNumbersにはpath:42が必要 | evidence quality 11/15達成。デュアル引用でFCとベンチマーク両方に対応 |
+| 深い構造のクラスタリング | `src/main/java/com/org/app/`=depth 7で意味のある分割。depth 2-3では全ファイルが1クラスタ | 2クラスタ→12クラスタ。各specialist15ファイル以下で適切な分析 |
+| CLI cwd=/tmp隔離 | claude -pがPIECE自身のCLAUDE.md/hooks/git stateを読み込み、分析結果がコミット提案に汚染 | specialist分析がcode analysisに正しく集中。60行→300行の高品質ドキュメント |
 
 ### プロンプト設計
 

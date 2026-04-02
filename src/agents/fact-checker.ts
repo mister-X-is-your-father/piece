@@ -163,20 +163,20 @@ function extractAllCitations(text: string): Set<string> {
     files.add(match[1]);
   }
 
-  // Backtick-quoted file paths: `src/foo/bar.ts`
-  const backtickRegex = /`((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))`/g;
+  // Backtick-quoted file paths: `src/foo/bar.ts` or `src/main/java/Foo.java`
+  const backtickRegex = /`((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|kt|py|go|rs|properties|xml|html))`/g;
   while ((match = backtickRegex.exec(text)) !== null) {
     files.add(match[1]);
   }
 
-  // Plain text file paths: src/foo/bar.ts or src/foo/bar.ts:123
-  const plainRegex = /(?:^|\s)((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))(?::\d+)?/gm;
+  // Plain text file paths: src/foo/bar.ts or src/main/java/Foo.java:123
+  const plainRegex = /(?:^|\s)((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|kt|py|go|rs|properties|xml|html))(?::\d+)?/gm;
   while ((match = plainRegex.exec(text)) !== null) {
     files.add(match[1]);
   }
 
   // Bold/markdown paths: **`src/foo.ts`** or *src/foo.ts*
-  const mdRegex = /\*{1,2}`?((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx))`?\*{1,2}/g;
+  const mdRegex = /\*{1,2}`?((?:src|lib|packages)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|kt|py|go|rs|properties|xml|html))`?\*{1,2}/g;
   while ((match = mdRegex.exec(text)) !== null) {
     files.add(match[1]);
   }
@@ -230,8 +230,39 @@ async function fastProgrammaticCheck(
     });
   }
 
-  // Also check plain file path references (src/path/file.ts)
-  const plainFileRegex = /((?:src|lib)\/[\w\-./]+\.(?:ts|js))/g;
+  // Also check inline path:line references (e.g., `src/main/java/.../Foo.java:42`)
+  const inlineLineRegex = /((?:src|lib)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|kt|py|go|rs)):(\d+)/g;
+  const checkedInline = new Set(statements.map((s) => `${s.citation?.file}:${s.citation?.startLine}`));
+
+  while ((match = inlineLineRegex.exec(answer)) !== null) {
+    const filePath = match[1];
+    const lineNum = parseInt(match[2]);
+    const key = `${filePath}:${lineNum}`;
+    if (checkedInline.has(key)) continue;
+    checkedInline.add(key);
+
+    const verification = await verifyCitation(rootPath, {
+      file: filePath,
+      startLine: lineNum,
+      endLine: lineNum,
+    });
+
+    const lineStart = answer.lastIndexOf("\n", match.index) + 1;
+    const statementText = answer.slice(lineStart, match.index).replace(/^[\s\-*`]+/, "").trim();
+
+    statements.push({
+      statement: (statementText || `References ${filePath}:${lineNum}`).slice(0, 200),
+      result: verification.result === "verified" ? "verified"
+            : verification.result === "partial" ? "partial"
+            : "unverified",
+      reason: verification.reason,
+      citation: { file: filePath, startLine: lineNum, endLine: lineNum },
+      codeSnippet: verification.snippet || undefined,
+    });
+  }
+
+  // Also check plain file path references without line numbers
+  const plainFileRegex = /((?:src|lib)\/[\w\-./]+\.(?:ts|js|tsx|jsx|java|kt|py|go|rs|properties|xml|html))/g;
   const checkedFiles = new Set(statements.map((s) => s.citation?.file));
 
   while ((match = plainFileRegex.exec(answer)) !== null) {
@@ -243,11 +274,6 @@ async function fastProgrammaticCheck(
     const exists = await fileExists(fullPath);
 
     if (exists) {
-      // Find surrounding statement text
-      const lineStart = answer.lastIndexOf("\n", match.index) + 1;
-      const lineEnd = answer.indexOf("\n", match.index);
-      const lineText = answer.slice(lineStart, lineEnd > 0 ? lineEnd : undefined).trim();
-
       statements.push({
         statement: `References ${filePath}`,
         result: "verified",

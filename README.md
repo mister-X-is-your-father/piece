@@ -2,12 +2,14 @@
 
 **Precise Integrated Expert Collaboration Engine**
 
-複数のAI専門家が協調してコードベースを深く理解し、使うほど賢くなるナレッジエンジン。
+ビジネスドメインごとのAI専門家チームが、コードベースを深く理解し、使うほど賢くなるナレッジエンジン。
 
 ```
-piece analyze .          →  9つの専門家がコードを分析
-piece ask . "認証は？"    →  専門家に聞く → 知識が蓄積
+piece analyze .          →  ビジネスドメインごとに専門家を自動生成
+piece app-map .          →  画面・API・操作・機能を自動検出
+piece ask . "認証は？"    →  Manager AIが専門家に委任 → 全回答にFact Check
 piece ask . "認証は？"    →  ⚡ 即答（AI呼び出しゼロ）
+piece feedback . --rating 2 --text "違う"  →  学習して次回は正しくなる
 ```
 
 ## Name
@@ -26,39 +28,91 @@ AIにコードの質問をしても、毎回ゼロから読み直す。前回教
 
 PIECEは違う:
 - **学んだ知識を蓄積する** — 同じ質問には即答
-- **専門家が分担する** — 1つのAIが全部知ろうとしない。各領域のスペシャリストが狭く深く
-- **根拠を示す** — 全回答にソースコード引用 + ファクトチェック
+- **専門家が分担する** — 「認証specialist」「freee連携specialist」のようにビジネスドメイン単位で狭く深く
+- **全回答にFact Check** — 各specialistの回答を個別に実コードと突合検証
 - **自律的に成長する** — 謎を見つけ、自分で調査し、知識を埋めていく
+- **間違いから学ぶ** — フィードバックで原因分析 → confidence/weight/ルールを永続修正
 
 ## Architecture
 
 ```
-                    ┌───────────────────────┐
-                    │     Orchestrator      │  質問を受け、担当を判断
-                    └───────────┬───────────┘
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-      │ Specialist A │ │ Specialist B │ │ Specialist C │
-      │ 認証モジュール │ │ DB層         │ │ API routes   │
-      └──────────────┘ └──────────────┘ └──────────────┘
-              │                 │                 │
-              └─────────────────┼─────────────────┘
-                                ▼
-                    ┌───────────────────────┐
-                    │    Fact Checker       │  回答を実コードと突合検証
-                    └───────────────────────┘
+              ┌──────────────────────────┐
+              │      Manager AI          │  調査依頼・協力依頼を委任
+              └────────────┬─────────────┘
+         ┌─────────────────┼──────────────────┐
+         ▼                 ▼                  ▼
+  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐
+  │ 認証         │  │ freee連携     │  │ インポート    │
+  │ specialist  │  │ specialist   │  │ specialist   │
+  │ (investigate)│  │ (collaborate)│  │              │
+  └──────┬──────┘  └──────┬───────┘  └──────────────┘
+         │                │
+         ▼                ▼
+  ┌─────────────┐  ┌─────────────┐
+  │ Fact Check  │  │ Fact Check  │  ← 全specialist個別にFact Check
+  └──────┬──────┘  └──────┬──────┘
+         └────────┬───────┘
+                  ▼
+         ┌───────────────┐
+         │ Manager統合    │  Fact Check結果付きで回答統合
+         └───────────────┘
 ```
 
-5種のAIエージェント:
+6種のAIエージェント:
 
 | Agent | Role |
 |-------|------|
-| **Orchestrator** | 質問ルーティング・回答統合 |
-| **Specialist** | 担当領域の深い分析・回答 |
-| **Fact Checker** | 全回答を実コードと突合検証 |
+| **Manager AI** | ビジネスドメイン専門家への調査依頼・協力依頼・回答統合 |
+| **Specialist** | 担当ドメインの深い分析・回答（全6検索戦略パイプラインを使用） |
+| **Fact Checker** | 全specialistの全回答を個別に実コードと突合検証（必須） |
 | **Investigator** | 謎を自律的に調査→知識生成 |
 | **Flow Tracer** | E2Eフローをモジュール横断追跡 |
+| **Feedback Analyzer** | フィードバックの原因分析→confidence/weight/ルール自動修正 |
+
+### Manager AIの委任モデル
+
+Manager AIは質問に応じて専門家に2種類の依頼を出す:
+
+- **investigate（調査依頼）** — 主担当。この専門家がメインで回答する
+- **collaborate（協力依頼）** — 副担当。関連する知識を補足提供する
+
+例: 「freeeのOAuth連携は？」→ freee連携specialist(investigate) + 認証specialist(collaborate)
+
+## Application Map
+
+コードベースの画面・API・操作・機能を自動検出し、コードと接続する。
+
+```bash
+piece app-map /path/to/webapp
+```
+
+```
+┌─ Application Map ─────────────────────┐
+│                                        │
+│  画面: ログイン画面 /login               │
+│    ├── 操作: メール入力, PW入力, ログイン │
+│    ├── handler: handleSubmit()          │
+│    └── code: src/app/login/page.tsx     │
+│                                        │
+│  API: POST /api/auth/login              │
+│    ├── handler: handleLogin()           │
+│    └── code: src/app/api/auth/route.ts  │
+│                                        │
+│  機能: 認証                              │
+│    ├── 画面: [ログイン, 登録]             │
+│    ├── API: [POST /login, POST /reg]   │
+│    └── service: AuthService             │
+│                                        │
+│  全要素がknowledge_nodesとして登録       │
+│  → piece ask で横断検索可能             │
+└────────────────────────────────────────┘
+```
+
+半自動フロー:
+1. コードからパターンマッチで自動検出（Next.js/Express/FastAPI等対応）
+2. AIが画面名・操作名・機能名を日本語で推論し、接続関係を推定
+3. `.scribe/app-map/` にMarkdown出力（Obsidianで確認・編集可能）
+4. ユーザーが修正 → `piece reindex` で取り込み → 精度向上
 
 ## Knowledge Brain
 
@@ -67,7 +121,7 @@ PIECEは違う:
 ```
 .scribe/vault/                  ← Obsidianで開ける。人間もAIも直接読める
   ├── MOC.md                    ← 知識の地図
-  ├── src-auth/
+  ├── 認証/
   │   ├── JWT認証の仕組み.md     ← [[リンク]]で繋がる
   │   └── ミドルウェア.md
   └── daily/
@@ -86,6 +140,7 @@ SQLiteが必要になるのは以下の場面:
 |------|-------------|-----------|
 | 「認証」で検索 | grep → ヒットする | 同じ |
 | 「セキュリティ」で検索 | grep → **ヒットしない**（「認証」としか書いてない） | concept展開 → 「認証」にも**ヒットする** |
+| 意味的に似た知識を探す | 不可能 | ベクトル検索 (similarity 0.97) でヒット |
 | よく一緒に使う知識の優先 | 判断できない | ヘッブ学習でweight上昇 → 上位に出る |
 | 「何を知らないか」の追跡 | 人間が目視で判断 | MECEセルのクエリ → 自動でmystery生成 |
 | 10,000ノードから検索 | grepが遅くなる | インデックスで一定速度 |
@@ -95,36 +150,36 @@ SQLiteが必要になるのは以下の場面:
 **まとめると:**
 - **Markdown** = 書く・読む・見る・共有する層。人間にもAIにもアクセスしやすい
 - **SQLite** = 検索・学習・計算する層。知識が増えるほど価値が出る
-- SQLiteが消えても `piece reindex` で全Markdownから再構築できる。5秒で復活する
-
-小さく始めてMarkdownだけで運用し、知識が増えてきたらSQLiteの恩恵を受ける設計になっている。
+- SQLiteが消えても `piece reindex` で全Markdownから再構築できる
 
 ### Neuron Search Engine
 
 脳科学にインスパイアされた検索エンジン（SQLite層）:
 
-- **N-gram Tokenizer** — 日本語(bigram/trigram) + 英語(word-level)。FTS5のUnicode61トークナイザーでは日本語が全くヒットしなかった問題を解決
-- **Concept Mesh** — 日英クロス言語の類義語ネットワーク。「セキュリティ」→「auth」→「認証」のように概念を展開。初期69ペアの手動シード + 使うたびにco-occurrenceで自動成長
-- **Spreading Activation** — 直接マッチしなくても、リンクを辿って関連知識を活性化。複数の弱い信号が束になると強い活性化になる（脳のシナプス伝達と同じ原理）
-- **Hebbian Learning** — 「一緒に使われたニューロンは繋がりが強くなる」。同じ回答に使われた知識ノード同士のリンクweightが+0.1（上限5.0）。7日以上使われないリンクは徐々に減衰（下限0.1）
+- **N-gram Tokenizer** — 日本語(bigram/trigram) + 英語(word-level)
+- **Concept Mesh** — 日英クロス言語の類義語ネットワーク（自動成長）
+- **Spreading Activation** — リンクを辿って関連知識を活性化
+- **Hebbian Learning** — 一緒に使われた知識同士のリンクが強化
+- **Vector Embeddings** — ローカル埋め込みモデル(all-MiniLM-L6-v2)による意味検索
 
 ### Multi-Strategy Search
 
-5つの検索戦略を並行実行し、結果を統合する。各戦略が異なる軸で知識空間をカバーするため、1つの戦略では見つからない知識も別の戦略で拾える。
+6つの検索戦略を並行実行し、結果を統合する。各戦略が異なる軸で知識空間をカバー。
 
-| Strategy | Weight | Method | カバーする軸 |
-|----------|--------|--------|------------|
-| Neuron | 1.0 | N-gram + concept展開 + 拡散活性化 | 意味的一致 |
-| Structural | 0.8 | ファイルパス・関数名で逆引き | 構造的一致 |
-| Temporal | 0.4 | 最近アクセスされた知識を優先 | 文脈的一致 |
-| Graph Walk | 0.6 | ヒットしたノードの隣接を探索 | 関係的一致 |
-| Tag Cluster | 0.7 | タグ集合のJaccard類似度 | 分類的一致 |
+| Strategy | Weight | カバーする軸 |
+|----------|--------|------------|
+| Neuron | 1.0 | N-gram + concept展開 + 拡散活性化 |
+| Vector | 1.2 | 埋め込みベクトルの意味的類似度 |
+| Structural | 0.8 | ファイルパス・関数名で逆引き |
+| Graph Walk | 0.6 | ヒットしたノードの隣接を探索 |
+| Tag Cluster | 0.7 | タグ集合のJaccard類似度 |
+| Temporal | 0.4 | 最近アクセスされた知識を優先 |
 
-複数戦略でヒットしたノードにクロスボーナス（2戦略で1.2倍、3戦略で1.4倍）。`createStrategy()`で独自戦略をプラグイン追加可能。
+複数戦略でヒットしたノードにクロスボーナス（最大1.4倍）。`createStrategy()`で独自戦略をプラグイン追加可能。
 
 ### MECE Matrix
 
-組み合わせテーブルで知識の漏れを検出する。対象（関数・モジュール・フロー）× 観点（正常系・異常系・境界値...）の全セルを列挙し、未調査のセルを可視化する。
+組み合わせテーブルで知識の漏れを検出する。
 
 ```
 handleLogin     │ 正常系 │ 異常系 │ 境界値 │
@@ -139,18 +194,51 @@ handleLogin     │ 正常系 │ 異常系 │ 境界値 │
 
 5種のビルトインテンプレート（function, module, flow, security, data lifecycle）+ カスタムテンプレート対応。
 
+## Feedback Evolution
+
+間違った回答からシステムが自律的に学ぶ。コンテキスト（会話履歴）に依存せず、仕組みとして永続化。
+
+```
+piece feedback . --rating 2 --text "JWTじゃなくてセッションベースだ"
+```
+
+```
+フィードバック → Feedback Analyzer（原因分析AI）
+  ├── 知識が間違い → confidence × 0.3 + 修正ノード作成
+  ├── 知識不足    → mystery生成 → investigate予約
+  ├── 検索が外れ  → concept weight修正
+  ├── 引用不正確  → citation検証
+  └── 統合が雑    → learned_rule追加
+  ↓
+全てSQLite + Markdownに永続化
+  ↓
+次回の同じ質問 → 自動的に正しい回答
+```
+
+| 何が変わるか | 永続化先 | 次回の効果 |
+|------------|---------|-----------|
+| ノードのconfidence | knowledge_nodes | 検索スコアに直接影響 |
+| リンクのweight | node_links | 拡散活性化の強度変化 |
+| 概念リンクの修正 | concept_links | 概念展開の結果が変わる |
+| 回避/優先ルール | learned_rules | 検索時に自動適用 |
+| 間違いキャッシュ | query_cache (DELETE) | 二度と同じ間違いを返さない |
+
 ## Growth Cycle
 
 ```
 ask → 知識DBに十分な情報あり → ⚡ 即答（AI呼び出しゼロ）
         ↓ 不足
-      AI回答 → 新知識をmarkdownに保存 → SQLite自動インデックス
+      Manager AI → specialist(investigate + collaborate)
         ↓
-      ファクトチェック → 未検証 → 謎(mystery)として登録
+      各specialist回答 → 個別Fact Check（必須）
         ↓
-      investigate → 謎を自律調査 → 知識追加 → concept mesh成長
+      統合回答 → 知識保存 → concept mesh成長 → ヘッブ学習
         ↓
-      同じ質問が来たら → キャッシュHIT → コスト$0
+      未検証 → mystery登録 → investigate → 知識追加
+        ↓
+      間違い → feedback → 原因分析 → confidence/weight/rule修正
+        ↓
+      同じ質問 → キャッシュHIT or 修正済み知識 → 正しい即答
 ```
 
 ## Install
@@ -164,47 +252,41 @@ npm install
 ## Usage
 
 ```bash
-# コードベースを分析（Specialist自動生成）
-npm run dev -- analyze /path/to/project
+# === Core ===
+piece analyze <path>                  # コードベース分析（specialist自動生成）
+piece analyze <path> --dry-run        # コスト見積もり
+piece ask <path> "質問"               # 質問（知識DB→Manager→specialist→Fact Check）
+piece specialists [path]              # specialist一覧
+piece update <path>                   # 差分更新
 
-# 質問（知識DB → AI → ファクトチェック → 知識保存）
-npm run dev -- ask /path/to/project "認証はどう動いてる？"
+# === Application Map ===
+piece app-map <path>                  # 画面・API・操作・機能を自動検出
+piece app-map <path> --screens        # 画面一覧
+piece app-map <path> --endpoints      # API一覧
+piece app-map <path> --features       # 機能一覧
+piece app-map <path> --operations     # 操作一覧
+piece app-map <path> --export         # Markdown出力
 
-# スペシャリスト一覧
-npm run dev -- specialists /path/to/project
+# === Knowledge Brain ===
+piece investigate <path>              # 自律調査（謎を自動選択）
+piece investigate <path> --loop 5     # 5サイクル連続調査
+piece mysteries <path>                # 未解決の謎一覧
+piece flows <path> --trace "フロー名"  # E2Eフロー追跡
+piece knowledge <path>                # 知識統計
+piece knowledge <path> --search "検索" # 知識検索
+piece knowledge <path> --graph        # 接続グラフ
 
-# 差分更新
-npm run dev -- update /path/to/project
+# === Feedback ===
+piece feedback <path> --rating 2 --text "間違い内容"  # フィードバック送信
+piece feedback <path> --list          # フィードバック履歴
+piece feedback <path> --rules         # 学習ルール一覧
+piece feedback <path> --stats         # 正答率推移
 
-# 自律調査（最優先の謎を自動選択）
-npm run dev -- investigate /path/to/project
-
-# 5サイクル連続調査
-npm run dev -- investigate /path/to/project --loop 5
-
-# 未解決の謎一覧
-npm run dev -- mysteries /path/to/project
-
-# E2Eフロー追跡
-npm run dev -- flows /path/to/project --trace "ログインフロー"
-
-# 知識統計
-npm run dev -- knowledge /path/to/project
-
-# 知識検索
-npm run dev -- knowledge /path/to/project --search "認証"
-
-# Obsidian vaultに書き出し
-npm run dev -- vault export /path/to/project
-
-# Obsidian vaultから取り込み
-npm run dev -- vault import /path/to/project /path/to/vault
-
-# 双方向同期
-npm run dev -- vault sync /path/to/project
-
-# SQLiteインデックス再構築
-npm run dev -- reindex /path/to/project
+# === Obsidian Vault ===
+piece vault export <path>             # 知識DB → Obsidian vault
+piece vault import <path> <vault>     # Obsidian vault → 知識DB
+piece vault sync <path>               # 双方向同期
+piece reindex <path>                  # SQLite再構築（Markdownから）
 ```
 
 ## Backend
@@ -213,17 +295,18 @@ npm run dev -- reindex /path/to/project
 
 ```bash
 # デフォルト: Claude Code CLI（APIキー不要）
-npm run dev -- analyze .
+piece analyze .
 
 # 直接API呼び出し（ANTHROPIC_API_KEY必要）
-npm run dev -- --backend api analyze .
+piece --backend api analyze .
 ```
 
 ## Tech Stack
 
 - TypeScript (ESM)
 - Claude Code CLI / Anthropic SDK
-- better-sqlite3 + FTS5
+- better-sqlite3 (knowledge DB, 7 migrations)
+- transformers.js (local embeddings, all-MiniLM-L6-v2)
 - Commander (CLI)
 - Zod (validation)
 - gray-matter (frontmatter)

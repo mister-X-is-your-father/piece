@@ -267,6 +267,92 @@ program
   });
 
 program
+  .command("logs")
+  .description("Analyze logs: ingest, detect patterns, find root causes")
+  .argument("<path>", "Path to the project")
+  .argument("[logfile]", "Log file to analyze (or pipe from stdin)")
+  .option("--name <name>", "Session name", "log-session")
+  .option("--list", "List past log sessions")
+  .option("--session <id>", "Show a specific session")
+  .option("--stats", "Show log analysis stats")
+  .option("-v, --verbose", "Verbose output")
+  .action(async (path: string, logfile: string | undefined, options) => {
+    if (options.verbose) setLogLevel("debug");
+    const { resolve } = await import("node:path");
+    const { readFile } = await import("node:fs/promises");
+    const { getKnowledgeDB, closeKnowledgeDB } = await import("./knowledge/db.js");
+    const { loadConfig } = await import("./config/loader.js");
+    const { LogStore, detectPatterns } = await import("./knowledge/log-analyzer.js");
+    const chalk = (await import("chalk")).default;
+
+    const config = await loadConfig(resolve(path));
+    const db = getKnowledgeDB(resolve(path, config.output.directory));
+    const store = new LogStore(db);
+
+    try {
+      if (options.stats) {
+        const stats = store.getStats();
+        console.log(chalk.cyan("━━━ Log Stats ━━━\n"));
+        console.log(`  Sessions: ${stats.sessions}`);
+        console.log(`  Total entries: ${stats.totalEntries}`);
+        console.log(`  Total errors: ${stats.totalErrors}`);
+        console.log(`  Findings: ${stats.findings}`);
+        return;
+      }
+
+      if (options.list) {
+        const sessions = store.listSessions();
+        console.log(chalk.cyan("━━━ Log Sessions ━━━\n"));
+        for (const s of sessions) {
+          console.log(`  ${s.name} (${s.entry_count} entries, ${s.error_count} errors) ${s.created_at}`);
+          console.log(chalk.gray(`    ID: ${s.id}`));
+        }
+        return;
+      }
+
+      if (options.session) {
+        const session = store.getSession(options.session);
+        if (!session) { console.error("Session not found"); return; }
+        const errors = session.entries.filter(e => e.level === "error");
+        console.log(chalk.cyan(`━━━ ${session.name} (${session.entries.length} entries) ━━━\n`));
+        for (const e of errors.slice(0, 20)) {
+          console.log(chalk.red(`  L${e.lineNumber} [${e.level}] ${e.message.slice(0, 100)}`));
+        }
+        return;
+      }
+
+      // Ingest log file
+      if (!logfile) { console.error("Log file path required"); return; }
+      const content = await readFile(resolve(logfile), "utf-8");
+      const session = store.ingestLog(options.name, content, logfile);
+
+      console.log(chalk.cyan(`Ingested: ${session.entries.length} entries (${session.entries.filter(e => e.level === "error").length} errors)\n`));
+
+      // Detect patterns
+      const patterns = detectPatterns(session.entries);
+      if (patterns.length > 0) {
+        console.log(chalk.cyan("━━━ Patterns Detected ━━━\n"));
+        for (const p of patterns) {
+          const icon = p.type === "error_spike" || p.type === "cascade" ? chalk.red("!!") : chalk.yellow("!");
+          console.log(`  ${icon} ${p.type}: ${p.description}`);
+          for (const e of p.entries.slice(0, 3)) {
+            console.log(chalk.gray(`    L${e.lineNumber}: ${e.message.slice(0, 80)}`));
+          }
+          console.log();
+        }
+
+        // Save as knowledge
+        const saved = store.saveAsKnowledge(session.id, patterns);
+        console.log(chalk.green(`  ${saved} findings saved as knowledge`));
+      } else {
+        console.log(chalk.gray("  No significant patterns detected"));
+      }
+    } finally {
+      closeKnowledgeDB();
+    }
+  });
+
+program
   .command("reindex")
   .description("Rebuild SQLite index from vault markdown files")
   .argument("<path>", "Path to the project")

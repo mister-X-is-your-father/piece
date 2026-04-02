@@ -452,6 +452,34 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS log_sessions (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL,
+        entry_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0,
+        time_range_start TEXT, time_range_end TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS log_entries (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES log_sessions(id) ON DELETE CASCADE,
+        timestamp TEXT, level TEXT NOT NULL, message TEXT NOT NULL,
+        source TEXT, line_number INTEGER NOT NULL, raw TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_log_entries_session ON log_entries(session_id, line_number);
+      CREATE INDEX IF NOT EXISTS idx_log_entries_level ON log_entries(level);
+      CREATE TABLE IF NOT EXISTS log_findings (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES log_sessions(id) ON DELETE CASCADE,
+        finding_type TEXT NOT NULL, description TEXT NOT NULL,
+        evidence_entries TEXT NOT NULL, severity INTEGER NOT NULL DEFAULT 5,
+        knowledge_node_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 export function getKnowledgeDB(scribePath: string): Database.Database {

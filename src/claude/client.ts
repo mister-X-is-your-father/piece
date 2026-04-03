@@ -64,11 +64,12 @@ async function callViaClaudeCode(req: AgentRequest): Promise<AgentResponse> {
       [
         "-p", "-",            // read prompt from stdin
         "--output-format", "json",
-        "--max-turns", "10",
+        "--max-turns", "1",   // No tool use — answer from provided context only
       ],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env },
+        cwd: "/tmp",          // Neutral directory — don't load PIECE's CLAUDE.md
       }
     );
 

@@ -105,7 +105,21 @@ async function loadSpecialistDocs(
   const specialistDir = join(scribePath, "specialists", specialistName);
   const parts: string[] = [];
 
-  // Load code index first — gives specialist concrete file:line references
+  // Load domain.json for file list context
+  try {
+    const domainRaw = await readFile(
+      join(specialistDir, "domain.json"),
+      "utf-8"
+    );
+    const domain = JSON.parse(domainRaw) as DomainJson;
+    if (domain.files.length > 0) {
+      parts.push(`# Domain: ${domain.name}\nDescription: ${domain.description}\nFiles in this domain:\n${domain.files.map(f => `- ${f}`).join("\n")}`);
+    }
+  } catch {
+    // No domain.json
+  }
+
+  // Load code index — gives specialist concrete file:line references
   try {
     const codeIndexRaw = await readFile(
       join(specialistDir, "_code-index.json"),
@@ -166,5 +180,15 @@ async function loadSpecialistDocs(
     logger.warn(`No file docs for specialist ${specialistName}`);
   }
 
-  return parts.join("\n\n---\n\n");
+  const combined = parts.join("\n\n---\n\n");
+
+  // Truncate to token budget to keep AI responses fast
+  // ~4 chars per token, target 30K tokens = 120KB
+  const MAX_CONTEXT_CHARS = 120_000;
+  if (combined.length > MAX_CONTEXT_CHARS) {
+    logger.info(`Specialist ${specialistName} context truncated: ${combined.length} → ${MAX_CONTEXT_CHARS} chars`);
+    return combined.slice(0, MAX_CONTEXT_CHARS) + "\n\n[... context truncated for token budget]";
+  }
+
+  return combined;
 }

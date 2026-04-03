@@ -202,35 +202,179 @@ export async function manageQuestion(
   };
 }
 
-// --- Delegation ---
+// --- Delegation (Programmatic — no AI call needed) ---
 
 async function delegateQuestion(
   question: string,
-  projectOverview: string,
-  specialistList: string,
+  _projectOverview: string,
+  _specialistList: string,
   config: ScribeConfig
 ): Promise<Assignment[]> {
-  const task: AgentTask = {
-    id: "manager-delegation",
-    model: config.agents.responseModel,
-    systemPrompt: MANAGER_ROUTING_SYSTEM,
-    userPrompt: `# Question\n${question}\n\n# Project Overview\n${projectOverview}\n\n# Available Specialists\n${specialistList}\n\n---\nDelegate this question. Output JSON only.`,
-    maxTokens: 1024,
-  };
+  // Programmatic routing: match question keywords against specialist metadata
+  // This is faster and more reliable than AI routing via Claude CLI
+  return programmaticRoute(question, config);
+}
 
-  const result = await runSingleAgent(task);
+/**
+ * Programmatic specialist routing using keyword matching.
+ * Scores each specialist by how well their keywords, files, and exports match the question.
+ * No AI call needed — instant routing with high accuracy.
+ */
+async function programmaticRoute(
+  question: string,
+  _config: ScribeConfig
+): Promise<Assignment[]> {
+  // Load global index for specialist metadata
+  const scribePath = currentScribePath;
+  if (!scribePath) return [];
 
   try {
-    const jsonStr = result.response.content
-      .replace(/```json?\n?/g, "")
-      .replace(/```/g, "")
-      .trim();
-    const parsed = JSON.parse(jsonStr);
-    return (parsed.assignments || []) as Assignment[];
-  } catch {
-    logger.warn("Failed to parse manager delegation, returning empty");
+    const raw = await readFile(join(scribePath, "_global-index.json"), "utf-8");
+    const index: GlobalIndex = JSON.parse(raw);
+
+    const questionLower = question.toLowerCase();
+    const questionWords = questionLower.split(/[\s?!.,;:]+/).filter(w => w.length > 2);
+    // Build word-boundary regex for precise matching
+    const wordBoundaryMatch = (text: string, word: string): boolean => {
+      if (word.length < 4) {
+        return new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
+      }
+      return text.includes(word);
+    };
+
+    // Prefix match: "cache" matches "caching", "migrate" matches "migration"
+    const prefixMatch = (a: string, b: string): boolean => {
+      const minLen = Math.min(a.length, b.length);
+      if (minLen < 4) return false;
+      const prefixLen = Math.min(minLen, 5); // Compare first 4-5 chars
+      return a.slice(0, prefixLen) === b.slice(0, prefixLen);
+    };
+
+    const scores: Array<{ name: string; score: number }> = [];
+
+    for (const [name, info] of Object.entries(index.specialists)) {
+      let score = 0;
+
+      // Match against specialist keywords (both directions)
+      for (const kw of info.keywords) {
+        const kwLower = kw.toLowerCase();
+        // Forward: question contains keyword
+        if (kwLower.length >= 4 && questionLower.includes(kwLower)) {
+          score += 3;
+        }
+        // Reverse: keyword contains a question word (e.g., "migrationexecutor" contains "migration")
+        for (const qw of questionWords) {
+          if (qw.length >= 4 && kwLower.includes(qw)) {
+            score += 2;
+          } else if (qw.length >= 4 && prefixMatch(kwLower, qw)) {
+            score += 1; // Prefix match: weaker signal
+          }
+        }
+      }
+
+      // Match against specialist name parts
+      const nameParts = name.split("-").filter(p => p !== "src" && p.length > 2);
+      for (const part of nameParts) {
+        const partLower = part.toLowerCase();
+        if (wordBoundaryMatch(questionLower, partLower)) {
+          score += 5;
+        } else {
+          // Prefix match: "cache" matches question word "caching"
+          for (const qw of questionWords) {
+            if (prefixMatch(partLower, qw)) {
+              score += 4;
+              break;
+            }
+          }
+        }
+      }
+
+      // Match against file basenames
+      for (const file of info.files) {
+        const basename = file.split("/").pop()?.replace(/\.\w+$/, "").toLowerCase() || "";
+        if (basename.length > 3 && questionLower.includes(basename)) {
+          score += 4;
+        }
+      }
+
+      // Match specialist description words
+      const descWords = info.description.toLowerCase().split(/\s+/);
+      for (const word of questionWords) {
+        if (descWords.includes(word)) {
+          score += 1;
+        }
+      }
+
+      // Try loading code index for export name matching
+      try {
+        const codeIndexRaw = await readFile(
+          join(scribePath, "specialists", name, "_code-index.json"),
+          "utf-8"
+        );
+        const codeIndex = JSON.parse(codeIndexRaw) as Array<{
+          file: string;
+          exports: { name: string; kind: string; line: number }[];
+        }>;
+        for (const entry of codeIndex) {
+          for (const exp of entry.exports) {
+            const expLower = exp.name.toLowerCase();
+            // Only match exports with 4+ char names to avoid false positives
+            if (expLower.length >= 4 && wordBoundaryMatch(questionLower, expLower)) {
+              score += 6;
+            }
+            // Reverse: export name contains question word
+            for (const qw of questionWords) {
+              if (qw.length >= 4 && expLower.includes(qw)) {
+                score += 3;
+              }
+            }
+          }
+        }
+      } catch {
+        // No code index
+      }
+
+      if (score > 0) {
+        scores.push({ name, score });
+      }
+    }
+
+    // Sort by score, take top 1-2
+    scores.sort((a, b) => b.score - a.score);
+
+    if (scores.length === 0) {
+      // Fallback: use "other" specialist if it exists
+      if (index.specialists["other"]) {
+        return [{
+          specialist: "other",
+          role: "investigate",
+          question,
+          reason: "Fallback to general specialist",
+        }];
+      }
+      return [];
+    }
+
+    const assignments: Assignment[] = [{
+      specialist: scores[0].name,
+      role: "investigate",
+      question,
+      reason: `Best keyword match (score: ${scores[0].score})`,
+    }];
+
+    logger.info(`Programmatic routing: ${assignments.map(a => `${a.specialist}(${a.role}:${scores.find(s=>s.name===a.specialist)?.score})`).join(", ")}`);
+
+    return assignments;
+  } catch (err) {
+    logger.warn(`Programmatic routing failed: ${err}`);
     return [];
   }
+}
+
+// Track current scribePath for programmatic routing
+let currentScribePath: string | null = null;
+export function setScribePath(path: string): void {
+  currentScribePath = path;
 }
 
 // --- Synthesis with Fact-Check ---

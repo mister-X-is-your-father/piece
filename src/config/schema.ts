@@ -22,7 +22,7 @@ export const AgentsConfigSchema = z.object({
   analysisModel: z.string().default("claude-sonnet-4-20250514"),
   responseModel: z.string().default("claude-sonnet-4-20250514"),
   factCheckModel: z.string().default("claude-haiku-4-5-20251001"),
-  concurrency: z.number().min(1).max(10).default(3),
+  concurrency: z.number().min(1).max(10).default(1),
   maxSpecialists: z.number().min(1).max(50).default(20),
 });
 

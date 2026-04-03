@@ -381,8 +381,8 @@ export function formatFactCheckReport(report: FactCheckReport): string {
 
     if (stmt.citation) {
       const loc = stmt.citation.endLine
-        ? `${stmt.citation.file}:L${stmt.citation.startLine}-L${stmt.citation.endLine}`
-        : `${stmt.citation.file}:L${stmt.citation.startLine}`;
+        ? `${stmt.citation.file}:${stmt.citation.startLine}-${stmt.citation.endLine}`
+        : `${stmt.citation.file}:${stmt.citation.startLine}`;
       lines.push(`     ${loc}`);
     }
 

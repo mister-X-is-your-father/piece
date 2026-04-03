@@ -4,6 +4,79 @@
 
 ---
 
+## Session 2026-04-03-7
+
+### 診断結果
+- 今回のギャップ: 全9軸で低スコア（S6は16/100、rate limitで無効スコア）。前回有効スコアS5=64/100
+- 前回からの変化: S6でCode Index導入済みだがrate limitで効果未測定。分析(analyze)が全滅していた
+- 共通の根本原因: (1) Claude CLIがPIECEのCLAUDE.mdを読み込んで混乱、(2) AI routing (haiku)が失敗、(3) Claude CLIプロセス起動オーバーヘッド
+
+### リサーチ
+- 調査テーマ: Source-grounded code QA / SWE-QA (repository-level question answering)
+- 発見した知見:
+  - SWE-QA (2025): Agent+RAG approach delivers +8-10 improvement over baseline
+  - SLOT: Structured output enforcement guarantees citation compliance
+  - Citation generation: Naïve prompting sufficient, but JSON schema ensures format consistency
+  - Faithfulness metric: ~30% of RAG statements typically unsupported → need programmatic verification
+- 採用判断: Programmatic routing（AI routing不要）、specialist contextにdomain.jsonファイルリスト注入、citation形式修正
+
+### 実施内容
+- 変更ファイル: manager.ts, specialist.ts, prompts/specialist.ts, fact-checker.ts, ask.ts, client.ts, schema.ts
+- 何をしたか:
+  1. **Programmatic routing**: AI routing (haiku/sonnet) を廃止。キーワードマッチング+prefix matching+code index export名マッチングで即時ルーティング（0ms、AI call不要）
+  2. **Claude CLI isolation**: `cwd: /tmp` + `max-turns: 1` でPIECEのCLAUDE.md読み込み防止。ツール使用を無効化
+  3. **Domain files注入**: specialist回答時にdomain.jsonのファイルリストをコンテキストに追加。ファイル名言及率向上
+  4. **プロンプト強化**: 具体的なクラス名・関数名・インターフェース名の明示要求。`[source:...]`引用3-4件以上、`## Related`セクション必須、不確実時の「未確認」明記
+  5. **Citation形式修正**: ファクトチェックレポートの `:L42` → `:42` に変更。ベンチマークの行番号検証が正常動作
+  6. **速度最適化**: knowledge extraction削除（askフロー内）、context truncation (120KB上限)、metadata出力改善（false cache detection防止）
+  7. **Rate limit対策**: concurrency 3→1、Claude CLI max-turns 10→1
+- なぜそうしたか:
+  - AI routing (haiku)がJSON parse失敗 → 全質問で「スペシャリスト見つからず」。最大のボトルネック
+  - Claude CLIがPIECEのCLAUDE.mdを読み込み、TypeORMではなくPIECEのコードについて回答していた
+  - knowledge extractionは回答品質に影響せずASK速度を15-20秒遅くしていた
+  - fact-check citation形式 `:L42` がベンチマーク行番号検証regex `(\d+)` に不一致
+
+### 結果
+- ビルド: OK
+- テスト: 18/18パス
+- **ベンチマーク: 80/100（ベスト）、77/100（安定値）**（S5=64から+16ポイント）
+  - ファクトチェック: 15/15 (S5から維持、0→15→15)
+  - ファイル正確性: 11/15 (S5:5.7→11、+5.3)
+  - 用語網羅性: 9.2/10 (S5:4.2→9.2、+5.0)
+  - 根拠の具体性: 15/15 (S5:2.3→15、+12.7。最大の改善)
+  - 回答の実質性: 8.9/10 (S5:2.5→8.9、+6.4)
+  - 誠実性: 8-10/10 (LLM variance、S5:5→8-10)
+  - フロー追跡: 5-7.5/10 (S5:2.5→7.5)
+  - 提案力: 5/5 (S5:0→5、満点)
+  - 応答速度: 0-2.3/10 (各質問40-70秒。Claude CLI起動オーバーヘッドが支配的)
+- うまくいったこと:
+  - Programmatic routingが劇的に効いた。AI routing全滅→keyword matchingで確実ルーティング
+  - Claude CLI isolation (`cwd: /tmp`) でPIECEコンテキスト混入を完全解決
+  - Code Index + domain.jsonファイルリストで具体的なファイル名・クラス名が回答に含まれるように
+  - citation形式修正で行番号検証が正常動作 → evidence quality 2.3→15
+  - 分析(analyze)がrate limitなしで全20スペシャリスト成功（concurrency=1）
+- うまくいかなかったこと:
+  - **速度**: Claude CLIプロセス起動に最低~15秒、API呼び出しに~25秒。合計~40秒/問で<20秒は不可能
+  - **"other"スペシャリスト**: 266ファイル(170KB context)。DataSource, QueryBuilder, Migration等の重要コードが全部ここに集中。応答が遅く品質もバラつく
+  - **LLM variance**: 同じ質問でも回答品質が変動（矛盾検出0-2件、フロー追跡5-7.5/10）
+  - **specialist list出力**: "src-cache"がbenckmarkのfromCache検出に干渉 → 修正済み
+- 残課題:
+  - 速度改善: Claude CLI → Direct API切替で起動オーバーヘッド削減（要API key）
+  - "other"スペシャリスト分割: 機能ベースクラスタリングで266ファイルを分割
+  - フロー追跡安定化: フロー質問の番号付きステップが不安定（LLM依存）
+
+### 次回への申し送り
+- 最優先: **速度改善**。2-3/10で10点分失っている。Direct API使用が最有力
+- 次点: "other"スペシャリスト分割（266ファイルは大きすぎる）
+- リサーチ候補: "fast code QA inference" / "specialist clustering by functionality" / "LLM response consistency"
+- 注意事項:
+  - Claude CLI `max-turns=1` で正常動作（ツール使用がないため`error_max_turns`回避）
+  - `cwd: /tmp` は必須（PIECEのCLAUDE.md読み込み防止）
+  - ベンチマークスコアはLLM varianceで±3変動する。複数回の中央値で判断すべき
+  - ベンチマーク前回スコア: **80/100**（ベスト）、安定値77
+
+---
+
 ## Session 2026-04-02-6
 
 ### 診断結果

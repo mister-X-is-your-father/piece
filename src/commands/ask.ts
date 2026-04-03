@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import ora from "ora";
 import chalk from "chalk";
 import { loadConfig } from "../config/loader.js";
-import { manageQuestion } from "../agents/manager.js";
+import { manageQuestion, setScribePath } from "../agents/manager.js";
 import { formatFactCheckReport } from "../agents/fact-checker.js";
 import { runSingleAgent, type AgentTask } from "../agents/agent-runner.js";
 import {
@@ -56,7 +56,7 @@ export async function runAsk(
 
   console.log(chalk.gray(`Project: ${metadata.projectPath}`));
   console.log(chalk.gray(`Analyzed: ${metadata.analyzedAt}`));
-  console.log(chalk.gray(`Specialists: ${metadata.specialists.join(", ")}`));
+  console.log(chalk.gray(`Domains: ${metadata.specialists.length} specialists`));
   console.log();
 
   const knowledgeEnabled =
@@ -135,6 +135,7 @@ export async function runAsk(
     }
 
     // === Phase 1: Manager delegates to domain specialists ===
+    setScribePath(scribePath);
     const spinner = ora("Manager delegating to specialists...").start();
 
     let result;
@@ -165,26 +166,8 @@ export async function runAsk(
       );
     }
 
-    // === Phase 3: Extract & save knowledge ===
-    let nodesSaved = 0;
-    if (knowledgeStore && config.knowledge.autoSaveKnowledge) {
-      const spinner3 = ora("Extracting knowledge...").start();
-
-      try {
-        nodesSaved = await extractAndSaveKnowledge(
-          question,
-          result.answer,
-          consultedSpecialistNames,
-          knowledgeStore,
-          config.knowledge.knowledgeExtractorModel,
-          scribePath
-        );
-        spinner3.succeed(`Saved ${nodesSaved} knowledge nodes`);
-      } catch (err) {
-        spinner3.warn(`Knowledge extraction failed: ${err}`);
-      }
-
-      // Cache the query
+    // === Phase 3: Cache query (fast, no AI call) ===
+    if (knowledgeStore) {
       knowledgeStore.cacheQuery({
         question,
         answer: result.answer,
@@ -226,12 +209,8 @@ export async function runAsk(
     }
 
     // Knowledge growth summary
-    if (nodesSaved > 0 || mysteriesCreated > 0) {
-      const parts: string[] = [];
-      if (nodesSaved > 0) parts.push(`${nodesSaved} knowledge nodes saved`);
-      if (mysteriesCreated > 0)
-        parts.push(`${mysteriesCreated} mysteries detected`);
-      console.log(chalk.green(`\n🧠 Growth: ${parts.join(", ")}`));
+    if (mysteriesCreated > 0) {
+      console.log(chalk.green(`\n🧠 Growth: ${mysteriesCreated} mysteries detected`));
     }
   } finally {
     closeKnowledgeDB();

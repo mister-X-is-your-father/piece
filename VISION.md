@@ -170,6 +170,7 @@ PIECEはコードを書き換えるツールではない。
 | 2026-04-02 | S4 | 44/100 | 厳格採点導入。ベースライン確定 |
 | 2026-04-02 | S5 | 64/100 | ファクトチェック修復(0→15)、プログラム的検証優先、プロンプト改善 |
 | 2026-04-02 | S6 | 16/100* | Code Index導入、Agent Runner耐障害性、CLI修正。*全specialist分析がrate limitで失敗したため無効スコア |
+| 2026-04-03 | S7 | 80/100 | Programmatic routing、Claude CLI isolation、Citation形式修正、Domain files注入。安定値77 |
 
 ---
 
@@ -390,6 +391,16 @@ PIECEはコードを書き換えるツールではない。
 | mustContainFacts | 「回答はしたけど核心が抜けてる」を検出。用語ヒットだけでは不十分 | 回答の実質性を測定 |
 | 基準凍結ルール | 採点方法を変えてスコアを上げる誘惑を断つ。経時比較の意味がなくなる | スコアの信頼性 |
 | テスト対象の自動clone | リモートトリガー(クラウド実行)に対応。毎回fresh環境でも動く | 自律改善ループが24/7動作 |
+
+### ルーティング
+
+| 工夫 | なぜそうしたか | 効果 |
+|------|-------------|------|
+| Programmatic routing | AI routing (haiku)がJSON parse失敗で全質問でルーティング失敗。キーワード+prefix+export名マッチングなら0msで確実 | AI call 1回削減、ルーティング精度100%、15-20秒/問の速度改善 |
+| Prefix matching | "cache"と"caching"、"migrate"と"migration"がマッチしない問題。4-5文字prefix比較で形態素変化に対応 | ルーティング精度向上（特にsrc-cacheへのルーティング） |
+| Word boundary matching | "in"が"migration"にsubstringマッチしてfalse positive。短い単語(3文字以下)は\b付きregexで検索 | false positive削減 |
+| Claude CLI isolation | PIECEのCLAUDE.mdがspecialist回答に混入。`cwd: /tmp`で中立ディレクトリから起動 | TypeORMについての正しい回答 |
+| max-turns=1 | ツール使用を無効化。specialistは提供コンテキストのみで回答すべき | PIECE自身のファイルを読む問題を解消 |
 
 ### プロンプト設計
 

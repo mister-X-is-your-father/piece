@@ -1,484 +1,345 @@
-# PIECE v2 — Distribution & IP Protection（配布・知財保護設計）
+# PIECE v2 — Distribution Design（配布・知財保護設計）
 
-PIECEをサービスとして提供する際に、
-**ソースコードを守りつつ、顧客のデータも守る**ための設計。
-
----
-
-## 1. ハイブリッド配布モデル
-
-```
-┌──── こちらのクラウド（ソース保護） ──────────────────┐
-│                                                     │
-│  ┌─────────────────────────────────────────┐       │
-│  │          PIECE Brain（知能）             │       │
-│  │                                         │       │
-│  │  ・AI判断ロジック                        │       │
-│  │  ・回答生成パイプライン（8ゲート）         │       │
-│  │  ・好奇心探索エンジン                    │       │
-│  │  ・ファクトチェックロジック               │       │
-│  │  ・検索アルゴリズム（Synapse v2）         │       │
-│  │  ・Profile解釈エンジン                   │       │
-│  │  ・回答品質スコアリング                   │       │
-│  │                                         │       │
-│  │  → ソースコードは一切外に出ない           │       │
-│  └──────────────────┬──────────────────────┘       │
-│                      │ 暗号化API（TLS 1.3）        │
-└──────────────────────┼──────────────────────────────┘
-                       │
-           ── 境界（Secure Tunnel）──
-                       │
-┌──── 顧客のネットワーク（データ保護） ──────────────────┐
-│                      │                               │
-│  ┌──────────────────┴──────────────────────┐       │
-│  │          PIECE Agent（手足）              │       │
-│  │                                         │       │
-│  │  ・ソースコード読み取り                   │       │
-│  │  ・ログ収集                              │       │
-│  │  ・DB読み取り（SELECT only）              │       │
-│  │  ・ブラウザ操作（Playwright）             │       │
-│  │  ・SSH接続                               │       │
-│  │                                         │       │
-│  │  → 顧客のデータは一切外に出ない           │       │
-│  │  → 収集したデータはBrainに要約だけ送る    │       │
-│  └─────────────────────────────────────────┘       │
-│                                                     │
-│  顧客のシステム: DB, サーバー, アプリ, ログ          │
-└─────────────────────────────────────────────────────┘
-```
-
-**核心:**
-- **Brain（知能）はクラウドに残る。** ソースコードは顧客に渡らない
-- **Agent（手足）は顧客のネットワークで動く。** データは外に出ない
-- **AgentがBrainに送るのは「要約」だけ。** 生データは送らない
+**SaaSモデルで両方を守る。** ソースコードも顧客データも。
 
 ---
 
-## 2. 何をどこに置くか
-
-### Brain（クラウド側） — 知財の核心
+## 1. 結論
 
 ```
-こちらが持つもの（ソース非公開）:
-  ├── Core Domain（Layer 0）     → 全アルゴリズム
-  ├── Use Cases（Layer 1）       → 全ビジネスロジック
-  ├── Ports（Layer 2）           → インターフェース定義
-  ├── AI Adapters（Layer 3一部） → AI呼び出し、回答生成
-  ├── Response Pipeline          → 8ゲート品質パイプライン
-  ├── Curiosity Engine           → 好奇心探索
-  ├── Search Engine              → Synapse v2
-  └── Knowledge Store            → 知識DB（テナント別、クラウド上）
-```
+ソースコード保護: SaaSだから解決。渡さない。
+顧客データ保護: 信頼基盤で解決。暗号化 + 顧客管理 + 監査。
 
-### Agent（顧客側） — 最小限のクライアント
-
-```
-顧客に渡すもの（IP価値が低い、または保護済み）:
-  ├── Agent Binary               → コンパイル済みバイナリ（ソースなし）
-  ├── Collectors                  → データ収集の薄いラッパー
-  ├── Probers                    → ブラウザ操作、API呼び出し
-  ├── Secure Tunnel Client       → Brain接続用の暗号化トンネル
-  └── Profile（YAML）            → 顧客自身が作成する設定
+PIECEは全てクラウドで動く。
+顧客にインストールさせるものはない。
+ソースコードは一切外に出ない。
+顧客データは暗号化+分離+顧客が完全に制御。
 ```
 
 ---
 
-## 3. Agent（顧客配布物）の保護
-
-### 3.1 コンパイル済みバイナリ配布
-
-Pythonソースを配布しない。コンパイルしたバイナリを渡す。
+## 2. 標準アーキテクチャ（SaaS）
 
 ```
-ビルドパイプライン:
-  Python source → Nuitka (AOTコンパイラ) → ネイティブバイナリ
-
-  piece-agent-linux-x86_64    ← Linux用
-  piece-agent-linux-arm64     ← ARM用
-  piece-agent-darwin-x86_64   ← macOS Intel
-  piece-agent-darwin-arm64    ← macOS Apple Silicon
-```
-
-```
-Nuitkaの利点:
-  - Pythonソースを完全にC言語にトランスパイル→コンパイル
-  - 逆コンパイルが極めて困難（CPython bytecodeより遥かに難しい）
-  - 依存ライブラリも含めて単一バイナリに
-  - 実行速度も向上
-```
-
-```bash
-# ビルド
-nuitka --standalone --onefile \
-  --include-package=piece.agent \
-  --output-filename=piece-agent \
-  piece/agent/main.py
-```
-
-### 3.2 Docker配布（代替）
-
-```dockerfile
-# Dockerfile.agent
-FROM python:3.12-slim AS builder
-# ソースをコピーしてコンパイル
-COPY piece/agent/ /build/
-RUN nuitka --standalone /build/main.py
-
-FROM gcr.io/distroless/cc-debian12
-COPY --from=builder /build/main.dist/ /app/
-ENTRYPOINT ["/app/main"]
-```
-
-```
-Dockerの利点:
-  - distrolessイメージ → シェルすらない。中に入れない
-  - マルチステージビルド → ソースはbuilderステージにしかない
-  - 最終イメージにはバイナリだけ
-
-Dockerの限界:
-  - 層を展開すればバイナリは取り出せる
-  - ただしコンパイル済みなので逆アセンブルは困難
-```
-
-### 3.3 ライセンス認証
-
-Agentは起動時にBrainに認証する。認証が通らなければ動かない。
-
-```python
-# piece/agent/license.py
-
-class LicenseValidator:
-    """
-    Agentの起動時にBrainにライセンス認証する。
-    認証が通らなければAgentは動作しない。
-    """
-
-    async def validate(self, license_key: str) -> LicenseInfo:
-        response = await self.brain_client.post(
-            "/api/license/validate",
-            json={
-                "license_key": license_key,
-                "agent_id": self.agent_id,
-                "machine_fingerprint": self._get_fingerprint(),
-                "timestamp": datetime.now().isoformat(),
-            },
-        )
-
-        if response.status_code != 200:
-            raise LicenseError("ライセンス認証失敗")
-
-        info = LicenseInfo(**response.json())
-
-        # 有効期限チェック
-        if info.expires_at < datetime.now():
-            raise LicenseError("ライセンス期限切れ")
-
-        # 同時接続数チェック
-        if info.active_agents >= info.max_agents:
-            raise LicenseError("同時接続数上限")
-
-        return info
-
-    def _get_fingerprint(self) -> str:
-        """マシン固有ID（MACアドレス + CPU ID + ディスクシリアル）"""
-        ...
-
-
-# 定期的に再認証（1時間ごと）
-# Brain側でライセンスを無効化すれば、Agent は1時間以内に停止
+┌──── PIECEクラウド ──────────────────────────────────────┐
+│                                                         │
+│  ┌── テナントA ──────┐  ┌── テナントB ──────┐          │
+│  │ [AES-256暗号化]    │  │ [AES-256暗号化]    │  完全分離│
+│  │                    │  │                    │          │
+│  │ 知識DB             │  │ 知識DB             │          │
+│  │ チケット           │  │ チケット           │          │
+│  │ 調査結果           │  │ 調査結果           │          │
+│  │ 回答履歴           │  │ 回答履歴           │          │
+│  └────────────────────┘  └────────────────────┘          │
+│                                                         │
+│  PIECE Brain + Agent 全てここ                           │
+│  ソースコード = クラウド上のみ                            │
+│                                                         │
+│  外部接続:                                               │
+│    GitHub/GitLab → OAuth連携（コードを参照）              │
+│    Datadog/Sentry → APIキー（ログ・エラーを参照）         │
+│    顧客DB → 読み取り専用接続（暗号化通信）                │
+│    顧客ステージング → HTTPS（ブラウザ操作）               │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 4. Brain ↔ Agent 通信プロトコル
+## 3. 顧客データ保護の仕組み
 
-### 4.1 データの分離原則
-
-```
-Agent → Brain に送るもの:
-  ✅ 要約・メタデータ（ファイル名、関数名、エラーメッセージ）
-  ✅ 構造化された調査結果（JSON）
-  ✅ スクリーンショット（RPA結果）
-  ❌ ソースコードの全文は送らない
-  ❌ DBの生データは送らない
-  ❌ 顧客の個人情報は送らない
-
-Brain → Agent に送るもの:
-  ✅ 調査指示（「このファイルのL42-L60を読め」）
-  ✅ ヒアリング質問
-  ✅ Playbook実行指示
-  ❌ Brain内部のアルゴリズムは送らない
-  ❌ 他テナントのデータは送らない
-```
-
-### 4.2 通信インターフェース
-
-```python
-# piece/agent/protocol.py
-
-class BrainProtocol:
-    """Agent→Brain通信の定義"""
-
-    # Agent → Brain（調査結果を報告）
-    async def report_investigation(
-        self,
-        ticket_id: str,
-        findings: list[Finding],        # 要約された調査結果
-    ) -> InvestigationDirective:        # 次の指示
-        ...
-
-    # Agent → Brain（証拠を報告）
-    async def report_evidence(
-        self,
-        ticket_id: str,
-        evidence: EvidenceSummary,       # 要約。生データではない
-    ) -> None:
-        ...
-
-    # Brain → Agent（調査指示）
-    async def get_directive(
-        self,
-        ticket_id: str,
-    ) -> AgentDirective:
-        """Brainからの指示を取得"""
-        ...
-
-    # Brain → Agent（Playbook実行指示）
-    async def get_playbook_steps(
-        self,
-        ticket_id: str,
-        playbook_name: str,
-    ) -> list[PlaybookStep]:
-        ...
-
-
-@dataclass
-class Finding:
-    """要約された調査結果（生データではない）"""
-    type: str                    # "file_content", "log_entry", "db_state", etc.
-    summary: str                 # 1行要約
-    details: dict                # 構造化された詳細（必要最小限）
-    confidence: Confidence
-    source: str                  # どこから取得したか
-
-@dataclass
-class EvidenceSummary:
-    """証拠の要約（生データは含まない）"""
-    source_type: str
-    summary: str
-    key_facts: list[str]         # 重要な事実だけ
-    screenshot_url: str | None   # スクショはセキュアストレージにアップ
-    confidence: Confidence
-
-@dataclass
-class AgentDirective:
-    """Brainからの指示"""
-    action: str                  # "read_file", "query_db", "probe_api", etc.
-    params: dict                 # アクション固有のパラメータ
-    scope: str                   # "summary_only" | "full_content"（何を返すか）
-```
-
-### 4.3 データ最小化の例
+### 3.1 暗号化
 
 ```
-ケース: 「src/auth/handler.ts のL42-60を確認して」
+保存時（at rest）:
+  全データ AES-256-GCM で暗号化
+  暗号化鍵は顧客ごとに異なる（テナント別鍵）
 
-Agent側:
-  1. ファイルを読む（顧客のサーバー上で）
-  2. 該当範囲のコードを取得
-  3. Brain に送る:
-     - scope="summary_only" の場合:
-       「validatePassword関数が存在。bcrypt.compareを呼んでいる。
-        引数: (inputPassword, hashedPassword)。戻り値: boolean」
-     - scope="full_content" の場合:
-       コードスニペットをそのまま送る（※設定で許可された場合のみ）
+通信時（in transit）:
+  全通信 TLS 1.3
+  顧客DB接続も SSL required（verify-full）
 
-Brain側:
-  受け取った要約/コードから判断・回答を生成
-
-顧客側の設定で制御:
-  data_policy:
-    allow_code_transfer: false       # コード全文の送信を禁止
-    allow_log_transfer: false        # ログ全文の送信を禁止
-    allow_screenshot_transfer: true  # スクショは許可
-    summary_only: true               # 要約のみ送信
+BYOK（Bring Your Own Key）:
+  顧客が自分のKMS鍵を提供可能（エンタープライズ）
+  PIECEのオペレータでも復号不可能
+  顧客が鍵を無効化 = 全データ即時アクセス不能
 ```
 
----
+### 3.2 テナント分離
 
-## 5. Secure Tunnel（安全な接続）
+```sql
+-- PostgreSQL Row Level Security
+-- アプリにバグがあっても、他テナントのデータは物理的に見えない
 
+ALTER TABLE knowledge_nodes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON knowledge_nodes
+    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+
+-- 全テーブルに同様のポリシー適用
 ```
-Agent ←→ Brain の接続方式:
 
-Option A: WireGuard VPN
-  - Agent起動時にWireGuardトンネルを確立
-  - Brain APIはVPN内部IPのみ公開
-  - 外部からBrain APIに到達不能
+### 3.3 データスコープ制御
 
-Option B: mTLS + WebSocket
-  - 相互TLS認証
-  - WebSocketで常時接続
-  - Agent証明書はライセンス認証時に発行
+顧客が「PIECEに何を見せるか」を細かく制御。
 
-Option C: SSH Reverse Tunnel（最もシンプル）
-  - Agentがoutbound SSHでBrainに接続
-  - ファイアウォールで inbound を開ける必要なし
-  - 顧客ネットワークのセキュリティポリシーに優しい
+```yaml
+# 顧客が設定する
+data_scope:
+  code:
+    repositories: [repo-a, repo-b]      # この2つだけ許可
+    exclude_paths:                        # これは絶対に見せない
+      - "**/.env*"
+      - "**/secrets/**"
+      - "**/credentials/**"
 
-推奨: Option B（mTLS + WebSocket）
-  理由: 双方向通信、証明書ベース認証、ファイアウォール穴不要
+  logs:
+    services: [api-server, worker]       # このサービスのログだけ
+    mask_fields: [email, phone, ip_address, credit_card]
+
+  database:
+    tables: [users, orders, products]    # このテーブルだけ
+    mask_columns:                         # この列はマスク
+      users: [password_hash, ssn, phone]
+      orders: [credit_card_number]
+    readonly: true                        # 書き込み不可（強制）
+
+  environments:
+    allow_staging: true                   # ステージングはOK
+    allow_production: false               # 本番は禁止
 ```
 
 ```python
-# piece/agent/tunnel.py
+# piece/adapters/security/data_scope.py
 
-class SecureTunnel:
-    """Brain への安全な接続"""
+class DataScopeEnforcer:
+    """データスコープを強制する。設定外のデータにはアクセス不能。"""
 
-    async def connect(self, config: TunnelConfig) -> Connection:
-        # mTLS証明書をロード（ライセンス認証時に取得済み）
-        ssl_context = ssl.create_default_context()
-        ssl_context.load_cert_chain(
-            certfile=config.client_cert,
-            keyfile=config.client_key,
-        )
-        ssl_context.load_verify_locations(config.ca_cert)
+    async def filter_file_access(self, path: str, scope: DataScope) -> bool:
+        """このファイルにアクセスしていいか"""
+        if any(fnmatch(path, pattern) for pattern in scope.code.exclude_paths):
+            return False  # 禁止パスに一致
+        return True
 
-        # WebSocket接続
-        ws = await websockets.connect(
-            config.brain_url,
-            ssl=ssl_context,
-            extra_headers={"X-License-Key": config.license_key},
-        )
+    async def mask_db_result(self, table: str, row: dict, scope: DataScope) -> dict:
+        """DBの結果からマスク対象列を隠す"""
+        masked_cols = scope.database.mask_columns.get(table, [])
+        return {
+            k: "***MASKED***" if k in masked_cols else v
+            for k, v in row.items()
+        }
 
-        return Connection(ws)
+    async def mask_log_entry(self, entry: str, scope: DataScope) -> str:
+        """ログからマスク対象フィールドを隠す"""
+        for field in scope.logs.mask_fields:
+            entry = re.sub(
+                rf'"{field}"\s*:\s*"[^"]*"',
+                f'"{field}": "***"',
+                entry,
+            )
+        return entry
+```
+
+### 3.4 監査ログ（顧客に全公開）
+
+```
+顧客はPIECEが自分のデータに何をしたかをリアルタイムで確認可能。
+
+GET /api/audit
+
+[
+  {"time": "10:15:03", "action": "read_file", "target": "src/auth/handler.ts:40-60", "agent": "specialist:auth"},
+  {"time": "10:15:05", "action": "query_db", "target": "users WHERE email=***", "agent": "specialist:auth"},
+  {"time": "10:15:08", "action": "search_log", "target": "service:auth level:error", "agent": "specialist:auth"},
+  {"time": "10:15:10", "action": "browser_open", "target": "https://staging.example.com/login", "agent": "rpa:browser"},
+]
+
+全操作が記録される。隠し事はゼロ。
+```
+
+### 3.5 データ保持・削除
+
+```
+顧客が制御:
+  チケット保持期間: 30日 / 90日 / 180日 / 365日 / 無制限（選択）
+  知識DB保持期間: 無制限（推奨） / カスタム
+  監査ログ保持期間: 365日（最低、法令遵守）
+
+データ削除:
+  DELETE /api/tenant/data
+  → 全データ即時削除（暗号化鍵の破棄で物理削除と同等）
+  → 削除証明書を発行
+
+データエクスポート:
+  GET /api/tenant/export
+  → 顧客の全データをJSON/CSVでダウンロード可能（ポータビリティ権）
 ```
 
 ---
 
-## 6. 料金モデル
+## 4. ソースコード保護
 
 ```
-SaaS料金（Brain利用料）:
-  ├── Starter:  ¥50,000/月  — 1プロダクト, 100チケット/月, Agent 1台
-  ├── Pro:      ¥150,000/月 — 3プロダクト, 500チケット/月, Agent 3台
-  ├── Business: ¥300,000/月 — 10プロダクト, 無制限, Agent 10台
-  └── Enterprise: 要相談    — カスタム, SLA保証, 専用Brain
+SaaSモデルなので、保護は自動的に成立する。
 
-Agent（顧客側）:
-  → 無料。Agent自体に価値はない。Brainがないと動かない。
+顧客に渡るもの:
+  ✅ Web UI（Next.js — フロントエンドのみ）
+  ✅ API仕様（OpenAPI — エンドポイントの契約だけ）
+  ✅ Product Profile仕様（YAML — 設定方法の文書）
 
-従量課金（オプション）:
-  AI呼び出し: ¥10/回答（Anthropic API費用のパススルー）
-  RPA実行: ¥5/回（Playwright実行費用）
-  ストレージ: ¥1/GB/月（知識DB）
-```
+顧客に渡らないもの:
+  ❌ Python ソースコード
+  ❌ アルゴリズム（検索、好奇心、ファクトチェック）
+  ❌ プロンプト（スペシャリスト、回答生成、品質ゲート）
+  ❌ DBスキーマの詳細
+  ❌ 内部アーキテクチャ
 
-**Agentを無料にする理由:**
-- AgentはBrainなしでは動かない（ライセンス認証で制御）
-- Agentのソースは保護済み（コンパイル済みバイナリ）
-- Agentを広くばらまくことが営業上有利（導入障壁を下げる）
-- 収益はBrain利用料で回収
-
----
-
-## 7. IP保護の多層防御
-
-```
-Layer 1: 物理的分離
-  → Brain（知能）はクラウドにしかない。顧客のサーバーに存在しない
-
-Layer 2: コンパイル
-  → Agent はNuitkaでネイティブバイナリ化。Pythonソースは配布しない
-
-Layer 3: コンテナ化
-  → distroless Docker。シェルもない。ファイルを見ることすら困難
-
-Layer 4: ライセンス認証
-  → Brainに認証が通らなければAgentは起動しない
-  → 認証は1時間ごとに再検証。ライセンス無効化で即停止
-
-Layer 5: 通信暗号化
-  → mTLS。盗聴不能。中間者攻撃不能
-
-Layer 6: データ最小化
-  → Agentが送るのは要約のみ。ソースコード全文は送らない（設定可能）
-
-Layer 7: 監査
-  → Agent↔Brain間の全通信をログ。不正利用の検出
+追加保護:
+  ソースコードはGitHubのprivateリポジトリ
+  デプロイはCI/CD（人間がサーバーにSSHしない）
+  社内アクセスもRBACで制限（開発者以外はコードを見れない）
 ```
 
 ---
 
-## 8. 顧客視点のインストール手順
+## 5. 顧客の接続方法
 
-```bash
-# 1. Agent をダウンロード（バイナリ or Docker）
-curl -L https://piece.example.com/agent/latest/linux-x86_64 -o piece-agent
-chmod +x piece-agent
+### 5.1 初期セットアップ（5ステップ）
 
-# 2. ライセンスキーを設定
-export PIECE_LICENSE_KEY="lic_xxxxxxxxxxxx"
-export PIECE_BRAIN_URL="wss://brain.piece.example.com"
+```
+1. PIECEにサインアップ
+   → メール認証 → テナント作成
 
-# 3. Product Profile を作成（YAML）
-vim piece-profile.yaml
+2. Product Profile を作成
+   → 管理画面でウィザード形式
+   → プロダクト名、ドメイン、スペシャリスト定義
 
-# 4. Agent 起動
-./piece-agent --profile piece-profile.yaml
+3. コードベースを接続
+   → GitHub OAuth で「Install PIECE App」
+   → リポジトリを選択（全部でなくていい）
 
-# --- Docker の場合 ---
-docker run -d \
-  -e PIECE_LICENSE_KEY=lic_xxxxxxxxxxxx \
-  -e PIECE_BRAIN_URL=wss://brain.piece.example.com \
-  -v ./piece-profile.yaml:/etc/piece/profile.yaml \
-  --name piece-agent \
-  piece/agent:latest
+4. 監視ツールを接続
+   → Datadog APIキーを入力（または Sentry / CloudWatch）
+
+5. 分析を実行
+   → ボタン1つでコードベース分析開始
+   → 完了後、即座にaskが使える
 ```
 
-**顧客がやること:**
-1. ライセンスキーを入れる
-2. YAML設定を書く（接続先、スペシャリスト定義）
-3. Agent を起動する
+### 5.2 セキュリティ設定（オプション）
 
-**顧客がやらないこと:**
-- ソースコードを見る
-- Brainを理解する
-- データベースを用意する（Brain側にある）
-- AIキーを用意する（Brain側にある）
+```
+6. データスコープ設定
+   → 何を見せるか細かく制御（YAML or 管理画面）
+
+7. BYOK設定（エンタープライズ）
+   → AWS KMSのARNを入力 → PIECE が顧客の鍵で暗号化
+
+8. IP制限
+   → PIECEへのアクセスを特定IPからのみ許可
+
+9. SSO設定
+   → SAML / OIDC で企業の認証基盤と統合
+```
+
+---
+
+## 6. プラン設計
+
+| | Starter | Pro | Business | Enterprise |
+|---|---|---|---|---|
+| 月額 | ¥50,000 | ¥150,000 | ¥300,000 | 要相談 |
+| プロダクト数 | 1 | 3 | 10 | 無制限 |
+| チケット/月 | 100 | 500 | 無制限 | 無制限 |
+| スペシャリスト数 | 5 | 20 | 50 | 無制限 |
+| ユーザー数 | 3 | 10 | 30 | 無制限 |
+| データ保持 | 90日 | 180日 | 365日 | カスタム |
+| BYOK | — | — | ✅ | ✅ |
+| SSO | — | — | ✅ | ✅ |
+| 専用インスタンス | — | — | — | ✅ |
+| SLA保証 | — | 99.9% | 99.9% | 99.99% |
+| 好奇心探索 | — | ✅ | ✅ | ✅ |
+| RPA（ブラウザ操作） | — | ✅ | ✅ | ✅ |
+
+---
+
+## 7. エンタープライズオプション
+
+99%の顧客はSaaSで十分。残り1%向け。
+
+```
+Option 1: 専用インスタンス
+  → 顧客専用のPIECEをAWSに立てる
+  → 他テナントと物理的に完全分離
+  → 料金: Business × 3〜
+
+Option 2: VPC内デプロイ
+  → 顧客のAWS VPC内にPIECEをデプロイ
+  → データが顧客のAWSアカウントから一切出ない
+  → PIECEのコードはDockerイメージ（コンパイル済み）で提供
+  → 料金: Business × 5〜
+
+Option 3: Confidential Computing
+  → AWS Nitro Enclaves で実行
+  → メモリ上のデータすら暗号化
+  → 顧客がattestation（暗号学的証明）で「承認されたコードのみ動作」を検証可能
+  → PIECEオペレータもAWSも顧客データを見れない
+  → 料金: 要相談
+```
+
+---
+
+## 8. コードベースの規模感
+
+```
+現在（v1 TypeScript）:
+  73ファイル / 14,693行
+
+  knowledge/  6,525行 (44%)  ← 知識エンジン（核心）
+  agents/     3,378行 (23%)  ← エージェント制御
+  commands/   1,735行 (12%)  ← CLIコマンド
+  analyzer/   1,109行 (8%)   ← コード分析
+  その他      1,946行 (13%)
+
+Python v2 予測:
+  Layer 0 (Core):    ~3,000行  ← アルゴリズムは移植
+  Layer 1 (UseCases): ~2,000行
+  Layer 2 (Ports):    ~500行   ← インターフェースのみ
+  Layer 3 (Adapters): ~5,000行 ← ライブラリ呼び出しが多い
+  Layer 4 (Entry):    ~2,000行
+  合計: ~12,500行
+
+  v1より小さくなる理由:
+    agent-runner.ts (150行) → Agent SDK (0行)
+    自前LSH-ANN (50行) → FAISS (呼び出しのみ)
+    自前N-gram (100行) → MeCab (呼び出しのみ)
+    CLIコマンド (1,735行) → Typer + FastAPI で削減
+
+Dockerイメージサイズ:
+  Python 3.12-slim base: ~150MB
+  依存ライブラリ: ~500MB (FAISS, MeCab, Playwright等)
+  PIECEコード: ~5MB
+  合計: ~650MB（圧縮後 ~300MB）
+```
 
 ---
 
 ## 9. 層との対応
 
 ```
-LAYERS.md のどこがどっちに行くか:
+LAYERS.md の全層がクラウドで動く:
 
-Brain（クラウド）:
-  Layer 0: Core Domain     → 全てBrain
-  Layer 1: Use Cases       → 全てBrain
-  Layer 2: Ports           → 全てBrain（Agentは参照しない）
-  Layer 3: Adapters
-    ├── ai/                → Brain（AI呼び出し）
-    ├── storage/           → Brain（知識DB）
-    ├── search/            → Brain（検索エンジン）
-    ├── notifications/     → Brain（Slack/Email送信）
-    └── verifiers/         → Brain（ファクトチェック）
-  Layer 4: Entry
-    ├── api/               → Brain（FastAPI）
-    └── cron/              → Brain（好奇心ループ）
+  Layer 0 (Core)      → クラウド
+  Layer 1 (UseCases)  → クラウド
+  Layer 2 (Ports)     → クラウド
+  Layer 3 (Adapters)  → クラウド
+  Layer 4 (Entry)     → クラウド
 
-Agent（顧客サーバー）:
-  Layer 3: Adapters
-    ├── collectors/        → Agent（ログ収集、メトリクス取得）
-    ├── probers/           → Agent（ブラウザ操作、API呼び出し）
-    ├── file_systems/      → Agent（ソースコード読み取り）
-    └── ast/               → Agent（AST解析）
-  Layer 4: Entry
-    └── agent/             → Agent（デーモンプロセス）
+顧客側に配置するものはゼロ。
 
-分割の原則:
-  「データに触るもの」→ Agent（顧客側）
-  「判断するもの」→ Brain（クラウド側）
+接続:
+  顧客のGitHub → PIECEクラウドがOAuth経由でAPI呼び出し
+  顧客のDatadog → PIECEクラウドがAPIキーで呼び出し
+  顧客のDB → PIECEクラウドがSSL接続（読み取り専用）
+  顧客のステージング → PIECEクラウドのPlaywrightがHTTPSアクセス
 ```

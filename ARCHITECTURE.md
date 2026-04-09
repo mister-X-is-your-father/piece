@@ -707,3 +707,625 @@ v1の6戦略を全てプロ仕様ライブラリで置き換える。
 | 007 | Agent Runner全滅 | Agent SDK の組み込みエラーハンドリング |
 | 008 | CLI max-turns制限 | Agent SDK にmax-turns制限なし |
 | 009 | Rate Limit全滅 | Agent SDK の組み込みバックオフ + async並行制御 |
+
+---
+
+## 10. RPA層設計
+
+### 10.1 全体像: 4層アーキテクチャ
+
+RPA層を加えると、システムは4層になる。
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Frontend Layer                         │
+│              Next.js（チャット + ダッシュボード）           │
+├──────────────────────────────────────────────────────────┤
+│                    Harness Layer (PIECE)                  │
+│      Brain + Hands + Session（判断・知識・ファクトチェック）  │
+├──────────────────────────────────────────────────────────┤
+│                    RPA Layer                              │
+│     ブラウザ操作 + ログ収集 + 動作検証 + スクリーンショット   │
+├──────────────────────────────────────────────────────────┤
+│                    Target Systems                         │
+│          顧客のアプリ / DB / サーバー / ログ基盤            │
+└──────────────────────────────────────────────────────────┘
+```
+
+**各層の境界を明確にする:**
+
+| 層 | やること | やらないこと |
+|---|---|---|
+| Frontend | UI表示、ユーザー入力 | 判断、ツール実行 |
+| Harness (PIECE) | 判断、知識検索、ファクトチェック、回答生成 | ブラウザ操作、外部ログ取得 |
+| RPA | ブラウザ操作、ログ収集、動作検証、スクショ | 判断、回答生成、知識管理 |
+| Target | 顧客のシステム（操作される側） | — |
+
+### 10.2 根本的な問い: ログ確認はどっちがやるべきか
+
+```
+パターンA: RPA層でログ収集→PIECEに渡す
+  RPA: SSH接続 → tail -f /var/log/app.log → フィルタ → PIECEに返す
+  PIECE: ログを受け取って分析・回答に反映
+
+パターンB: PIECE（Hands層）が直接ログDBを叩く
+  PIECE: SELECT * FROM logs WHERE level='ERROR' AND timestamp > now()-1h
+  ログ基盤(Datadog等)のAPIを直接叩く
+
+パターンC: ハイブリッド
+  構造化ログ（DB、Datadog等） → PIECE Hands層が直接アクセス
+  非構造化ログ（ファイル、コンソール出力） → RPA層が収集してPIECEに渡す
+```
+
+**結論: パターンC（ハイブリッド）を採用する。**
+
+理由:
+```
+構造化ログ（DB/API）:
+  → クエリで取れる → APIコール1回 → PIECEのHands層で十分
+  → RPAを挟む意味がない（遅くなるだけ）
+  → 例: Datadog API, CloudWatch, Supabase logs
+
+非構造化ログ（ファイル/SSH/コンソール）:
+  → サーバーにSSH接続してtail → パース → フィルタ
+  → これはRPAの仕事（外部システムへの物理的アクセス）
+  → 例: /var/log/nginx/error.log, Docker logs, PM2 logs
+
+ブラウザのDevToolsログ:
+  → ブラウザを操作しないと取れない → RPA
+  → Network tab, Console errors, Performance
+```
+
+### 10.3 RPA層のアーキテクチャ
+
+```
+piece/
+├── piece/                      # ハーネス（既存）
+│   ├── brain/
+│   ├── hands/
+│   │   ├── tools.py
+│   │   ├── log_query.py        # 構造化ログ（DB/API直接）
+│   │   └── rpa_client.py       # RPA層への依頼インターフェース ★
+│   └── session/
+│
+└── rpa/                        # RPA層（独立サービス）
+    ├── pyproject.toml
+    ├── rpa/
+    │   ├── __init__.py
+    │   ├── server.py           # FastAPI（PIECE→RPAの通信口）
+    │   │
+    │   ├── browser/            # ブラウザ操作
+    │   │   ├── __init__.py
+    │   │   ├── engine.py       # Playwright制御エンジン
+    │   │   ├── actions.py      # 操作アクション定義
+    │   │   ├── capture.py      # スクリーンショット・録画
+    │   │   └── devtools.py     # DevToolsログ収集
+    │   │
+    │   ├── logs/               # 非構造化ログ収集
+    │   │   ├── __init__.py
+    │   │   ├── ssh_collector.py    # SSH経由のログ取得
+    │   │   ├── docker_collector.py # Docker logs
+    │   │   ├── file_collector.py   # ローカルファイル
+    │   │   └── parser.py           # ログパース・正規化
+    │   │
+    │   ├── verify/             # 動作検証
+    │   │   ├── __init__.py
+    │   │   ├── scenario.py     # 検証シナリオ定義
+    │   │   ├── runner.py       # シナリオ実行エンジン
+    │   │   ├── assertion.py    # 期待値チェック
+    │   │   └── report.py       # 検証レポート生成
+    │   │
+    │   ├── config/             # RPA設定
+    │   │   ├── targets.yaml    # 対象システム定義
+    │   │   └── credentials.py  # 認証情報管理（Vault連携）
+    │   │
+    │   └── models.py           # Pydantic スキーマ
+    │
+    └── tests/
+```
+
+### 10.4 PIECE ↔ RPA 通信設計
+
+**RPA層は独立サービスとして動く。PIECEとはHTTP APIで通信する。**
+
+なぜプロセス内に組み込まないか:
+```
+1. Playwrightのブラウザプロセスは重い（メモリ、CPU）
+   → PIECEのエージェント処理に影響を与えたくない
+
+2. RPAは対象システムのネットワーク内にいる必要がある場合がある
+   → PIECEと別マシンで動くかもしれない
+
+3. RPAだけスケールしたい場合がある
+   → 複数ブラウザで並列検証
+```
+
+#### 通信インターフェース
+
+```
+PIECE → RPA:
+  POST /rpa/browser/execute     ブラウザ操作の実行
+  POST /rpa/logs/collect        ログ収集の実行
+  POST /rpa/verify/run          動作検証の実行
+  GET  /rpa/jobs/{id}/status    ジョブの進捗確認
+  GET  /rpa/jobs/{id}/result    ジョブの結果取得
+
+RPA → PIECE:
+  POST /api/tickets/{id}/evidence   証拠データの送信（コールバック）
+```
+
+#### PIECE Hands層からの呼び出し
+
+```python
+# piece/hands/rpa_client.py
+
+class RPAClient:
+    """PIECE→RPA通信クライアント。Agent SDKのツールとして使える。"""
+
+    def __init__(self, rpa_url: str):
+        self.base_url = rpa_url
+        self.client = httpx.AsyncClient()
+
+    async def execute_browser_action(
+        self, action: BrowserAction
+    ) -> BrowserResult:
+        """ブラウザ操作を実行し結果を待つ"""
+        resp = await self.client.post(
+            f"{self.base_url}/rpa/browser/execute",
+            json=action.dict(),
+        )
+        job = resp.json()
+        return await self._wait_for_result(job["id"])
+
+    async def collect_logs(
+        self, target: str, query: LogQuery
+    ) -> LogCollection:
+        """非構造化ログを収集する"""
+        resp = await self.client.post(
+            f"{self.base_url}/rpa/logs/collect",
+            json={"target": target, "query": query.dict()},
+        )
+        job = resp.json()
+        return await self._wait_for_result(job["id"])
+
+    async def verify_scenario(
+        self, scenario: VerificationScenario
+    ) -> VerificationReport:
+        """動作検証シナリオを実行する"""
+        resp = await self.client.post(
+            f"{self.base_url}/rpa/verify/run",
+            json=scenario.dict(),
+        )
+        job = resp.json()
+        return await self._wait_for_result(job["id"])
+```
+
+#### PIECE Specialist がRPAを使う例
+
+```python
+# piece/brain/specialist.py
+
+class SpecialistAgent:
+    @tool
+    async def reproduce_issue(
+        self, url: str, steps: list[str]
+    ) -> ReproductionResult:
+        """顧客の報告を実際にブラウザで再現する"""
+        action = BrowserAction(
+            target_url=url,
+            steps=[BrowserStep(action=s) for s in steps],
+            capture_screenshot=True,
+            capture_console=True,
+            capture_network=True,
+        )
+        return await self.rpa_client.execute_browser_action(action)
+
+    @tool
+    async def check_server_logs(
+        self, target: str, time_range: str, level: str
+    ) -> LogCollection:
+        """サーバーログを確認する（非構造化ログ）"""
+        query = LogQuery(
+            time_range=time_range,
+            level=level,
+            limit=100,
+        )
+        return await self.rpa_client.collect_logs(target, query)
+
+    @tool
+    async def query_log_db(
+        self, sql: str
+    ) -> list[dict]:
+        """構造化ログをDBから直接取得する（RPA不要）"""
+        # これはHands層の直接ツール。RPAを経由しない
+        return await self.log_db.execute(sql)
+```
+
+### 10.5 ログ確認の判断フロー
+
+PIECEのBrain層が「どの手段でログを取るか」を自律判断する:
+
+```
+質問: 「エラーが出る」
+
+Brain (Manager):
+  1. 構造化ログがあるか？
+     → Datadog/CloudWatch/ログDB → Hands層で直接クエリ（高速）
+
+  2. 非構造化ログが必要か？
+     → サーバーファイル/Docker/PM2 → RPA層に依頼（SSH接続）
+
+  3. ブラウザログが必要か？
+     → DevTools Console/Network → RPA層に依頼（Playwright）
+
+  4. 再現が必要か？
+     → ブラウザで操作を再現 → RPA層に依頼（操作+キャプチャ）
+```
+
+```python
+# piece/brain/manager.py での判断ロジック
+
+class Manager:
+    async def investigate_with_evidence(self, question: str, ticket: Ticket):
+        # スペシャリストの調査結果
+        answers = await self.delegate_to_specialists(question)
+
+        # 確信度チェック
+        fc = await self.fact_checker.check(answers)
+
+        low_conf = [s for s in fc.statements if s.confidence == Confidence.LOW]
+
+        if low_conf:
+            # 確信度低 → 追加証拠が必要
+            evidence_plan = await self.plan_evidence_gathering(low_conf, ticket)
+
+            for task in evidence_plan:
+                match task.type:
+                    case "log_query":
+                        # 構造化ログ → Hands直接
+                        result = await self.hands.query_log_db(task.query)
+                    case "log_collect":
+                        # 非構造化ログ → RPA
+                        result = await self.hands.rpa.collect_logs(task.target, task.query)
+                    case "reproduce":
+                        # ブラウザ再現 → RPA
+                        result = await self.hands.rpa.reproduce_issue(task.url, task.steps)
+                    case "verify":
+                        # 動作検証 → RPA
+                        result = await self.hands.rpa.verify_scenario(task.scenario)
+
+                # 証拠をticketに添付
+                await self.session.add_evidence(ticket.id, result)
+
+            # 証拠を踏まえて再回答
+            answers = await self.delegate_to_specialists(
+                question,
+                additional_context=evidence_plan.results,
+            )
+```
+
+### 10.6 RPA層の内部設計
+
+#### ブラウザエンジン
+
+```python
+# rpa/browser/engine.py
+
+class BrowserEngine:
+    """Playwright ベースのブラウザ自動操作エンジン"""
+
+    async def execute(self, action: BrowserAction) -> BrowserResult:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                record_video_dir="/tmp/rpa_videos" if action.record_video else None,
+            )
+            page = await context.new_page()
+
+            # DevToolsログ収集開始
+            console_logs = []
+            network_logs = []
+            if action.capture_console:
+                page.on("console", lambda msg: console_logs.append(msg))
+            if action.capture_network:
+                page.on("response", lambda resp: network_logs.append(resp))
+
+            # ステップ実行
+            results = []
+            for step in action.steps:
+                result = await self._execute_step(page, step)
+                results.append(result)
+
+                if action.capture_screenshot:
+                    screenshot = await page.screenshot()
+                    result.screenshot = screenshot
+
+            await browser.close()
+
+            return BrowserResult(
+                steps=results,
+                console_logs=console_logs,
+                network_logs=network_logs,
+                success=all(r.success for r in results),
+            )
+
+    async def _execute_step(self, page, step: BrowserStep) -> StepResult:
+        match step.action:
+            case "navigate":
+                await page.goto(step.url)
+            case "click":
+                await page.click(step.selector)
+            case "fill":
+                await page.fill(step.selector, step.value)
+            case "wait":
+                await page.wait_for_selector(step.selector)
+            case "assert_visible":
+                visible = await page.is_visible(step.selector)
+                return StepResult(success=visible, detail=f"visible={visible}")
+            case "assert_text":
+                text = await page.text_content(step.selector)
+                match = step.expected in text if text else False
+                return StepResult(success=match, detail=f"text={text}")
+        return StepResult(success=True)
+```
+
+#### ログ収集
+
+```python
+# rpa/logs/ssh_collector.py
+
+class SSHLogCollector:
+    """SSH経由で非構造化ログを収集"""
+
+    async def collect(self, target: SSHTarget, query: LogQuery) -> LogCollection:
+        async with asyncssh.connect(
+            target.host, username=target.user, client_keys=[target.key]
+        ) as conn:
+            # ログファイルをフィルタリングして取得
+            cmd = self._build_command(query)
+            result = await conn.run(cmd)
+
+            # パースして正規化
+            entries = self.parser.parse(result.stdout, query.format)
+
+            return LogCollection(
+                source=f"ssh://{target.host}{query.path}",
+                entries=entries,
+                total=len(entries),
+                time_range=query.time_range,
+            )
+
+    def _build_command(self, query: LogQuery) -> str:
+        """ログ取得コマンドを構築"""
+        parts = [f"tail -n {query.limit} {query.path}"]
+        if query.level:
+            parts.append(f"| grep -i '{query.level}'")
+        if query.keyword:
+            parts.append(f"| grep '{query.keyword}'")
+        if query.time_range:
+            parts.append(f"| awk '$0 >= \"{query.since}\"'")
+        return " ".join(parts)
+```
+
+#### 動作検証
+
+```python
+# rpa/verify/runner.py
+
+class VerificationRunner:
+    """修正後の動作を自動検証する"""
+
+    async def run(self, scenario: VerificationScenario) -> VerificationReport:
+        engine = BrowserEngine()
+
+        results = []
+        for case in scenario.test_cases:
+            # 前提条件セットアップ
+            if case.setup:
+                await engine.execute(case.setup)
+
+            # テスト操作実行
+            result = await engine.execute(case.action)
+
+            # アサーション
+            assertions = []
+            for assertion in case.assertions:
+                passed = self._check_assertion(assertion, result)
+                assertions.append(AssertionResult(
+                    description=assertion.description,
+                    passed=passed,
+                    actual=result.get_value(assertion.target),
+                    expected=assertion.expected,
+                ))
+
+            results.append(TestCaseResult(
+                name=case.name,
+                passed=all(a.passed for a in assertions),
+                assertions=assertions,
+                screenshot=result.steps[-1].screenshot if result.steps else None,
+            ))
+
+        return VerificationReport(
+            scenario=scenario.name,
+            passed=all(r.passed for r in results),
+            results=results,
+            summary=self._summarize(results),
+        )
+```
+
+### 10.7 対象システム定義（YAML）
+
+```yaml
+# rpa/config/targets.yaml
+
+targets:
+  production:
+    name: 本番環境
+    base_url: https://app.example.com
+    auth:
+      type: cookie
+      login_url: /login
+      credentials_ref: vault://prod/admin  # Vault参照
+    logs:
+      structured:
+        type: datadog
+        api_key_ref: vault://datadog/api_key
+        service: app-backend
+      unstructured:
+        - type: ssh
+          host: app-server-1
+          user: deploy
+          key_ref: vault://ssh/deploy_key
+          paths:
+            - /var/log/app/error.log
+            - /var/log/nginx/access.log
+        - type: docker
+          container: app-backend
+          compose_file: /opt/app/docker-compose.yml
+
+  staging:
+    name: ステージング環境
+    base_url: https://staging.example.com
+    auth:
+      type: basic
+      credentials_ref: vault://staging/admin
+    logs:
+      structured:
+        type: supabase
+        project_ref: xxxx
+        api_key_ref: vault://supabase/service_key
+```
+
+### 10.8 セキュリティ設計
+
+```
+認証情報:
+  → 全てVault（HashiCorp Vault or AWS Secrets Manager）経由
+  → RPA層は認証情報を永続化しない
+  → 実行時にVaultから取得、メモリ上のみ
+
+ネットワーク:
+  → RPA層は対象システムのネットワーク内に配置
+  → PIECE → RPA は mTLS で暗号化
+  → RPA → Target はtargetの認証方式に従う
+
+権限:
+  → RPA層はread-onlyが原則（ログ収集、画面確認のみ）
+  → 書き込み操作（フォーム入力等）はscenario定義でホワイトリスト
+  → 本番環境への書き込みは承認フラグ必須
+```
+
+### 10.9 PIECEのログ分析との関係
+
+PIECEには既に `log-analyzer` がある（v1のsrc/knowledge/log-analyzer.ts）。
+これとRPA層のログ収集の関係:
+
+```
+RPA層: ログを「集める」（SSH、Docker、DevTools）
+  ↓ 生ログデータ
+PIECE Hands層: ログを「解析する」（パターン検出、タイムライン、異常検知）
+  ↓ 解析結果
+PIECE Brain層: ログ解析結果を「判断に使う」（原因特定、回答生成）
+```
+
+つまり:
+- **収集** = RPA層（物理的アクセス）
+- **解析** = PIECE Hands層（log-analyzer のPython版）
+- **判断** = PIECE Brain層（エージェントの推論）
+
+```python
+# piece/hands/log_analyzer.py（PIECE側）
+
+class LogAnalyzer:
+    """収集されたログを解析する（パターン検出、タイムライン、異常検知）"""
+
+    async def analyze(self, logs: LogCollection) -> LogAnalysis:
+        # 1. エラーパターン検出
+        patterns = self.detect_patterns(logs.entries)
+
+        # 2. タイムライン構築
+        timeline = self.build_timeline(logs.entries)
+
+        # 3. 異常検知
+        anomalies = self.detect_anomalies(logs.entries)
+
+        # 4. 相関分析（複数ログソース間）
+        correlations = self.find_correlations(logs.entries)
+
+        return LogAnalysis(
+            patterns=patterns,
+            timeline=timeline,
+            anomalies=anomalies,
+            correlations=correlations,
+            summary=self.summarize(patterns, anomalies),
+        )
+```
+
+### 10.10 デプロイ構成
+
+```
+┌─ Cloud / On-premises ──────────────────────────────┐
+│                                                     │
+│  ┌─ PIECE Harness ─────┐  ┌─ RPA Service ────────┐ │
+│  │ FastAPI              │  │ FastAPI               │ │
+│  │ Brain + Hands        │  │ Playwright            │ │
+│  │ Session (PostgreSQL) │←→│ SSH / Docker clients  │ │
+│  │                      │  │                       │ │
+│  │ :8000               │  │ :8100                 │ │
+│  └──────────────────────┘  └───────────────────────┘ │
+│         ↑                          ↑                  │
+│         │ API                      │ Target access    │
+│  ┌──────┴──────┐           ┌───────┴──────────┐      │
+│  │  Frontend   │           │  Target Systems  │      │
+│  │  Next.js    │           │  App / DB / Logs  │      │
+│  │  :3000      │           │                   │      │
+│  └─────────────┘           └──────────────────┘      │
+└──────────────────────────────────────────────────────┘
+
+通信:
+  Frontend → PIECE:  HTTPS (REST + SSE)
+  PIECE → RPA:       HTTPS (mTLS)
+  RPA → Targets:     SSH / HTTPS / Docker API
+```
+
+### 10.11 RPA層を使った調査フロー全体像
+
+```
+顧客:「ログインできない」
+  ↓
+① Frontend → PIECE API: POST /api/tickets
+  ↓
+② PIECE ヒアリング:「ブラウザは何ですか？エラーメッセージは出ましたか？」
+  ↓（顧客回答: Chrome、「Invalid credentials」と表示）
+  ↓
+③ PIECE Manager → Specialist(バックエンド):「認証エラーを調査」
+  ↓
+④ Specialist判断: 「ログとブラウザ再現が必要」
+  ↓
+⑤-a PIECE → Hands(直接): SELECT * FROM auth_logs WHERE status='failed' ORDER BY created_at DESC LIMIT 10
+    → 結果: 「このユーザーのログイン試行は記録されていない」
+  ↓
+⑤-b PIECE → RPA: 「このURL+認証情報でログインを試行して」
+    → RPA: Playwright実行 → スクリーンショット + NetworkログCapture
+    → 結果: 「403 Forbidden, APIが /api/v2/auth を返している、レスポンスbody: {"error":"account_locked"}」
+  ↓
+⑤-c PIECE → RPA: 「サーバーログの過去1時間のauth関連エラーを取得して」
+    → RPA: SSH → grep 'auth' /var/log/app/error.log
+    → 結果: 「Account locked after 5 failed attempts (IP: 203.0.113.1)」
+  ↓
+⑥ Specialist統合: 「アカウントがロックされている。5回の失敗試行後にロック。ログインではなくアカウントロック解除が必要」
+  ↓
+⑦ PIECE FactCheck(Opus):
+    - ✅ HIGH: auth_logsにログイン記録なし（DBクエリ結果で確認）
+    - ✅ HIGH: APIが account_locked を返している（RPA Networkログで確認）
+    - ✅ HIGH: 5回失敗でロック（サーバーログで確認）
+  ↓
+⑧ PIECE → 回答ドラフト:
+    「お客様のアカウントは、5回のログイン失敗によりロックされています。
+     管理画面からロックを解除してください。
+     [証拠: ログ、APIレスポンス、スクリーンショット添付]」
+  ↓
+⑨ エンジニアレビュー: 確信度HIGH×3 → サッと確認 → 承認
+  ↓
+⑩ 顧客に送信
+```

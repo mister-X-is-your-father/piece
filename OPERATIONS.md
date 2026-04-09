@@ -678,7 +678,379 @@ CREATE TABLE customer_profiles (
 
 ---
 
-## 10. チェックリスト: 設計の穴
+## 10. 「1名+1名」体制の設計
+
+### 10.1 目標
+
+```
+目指すべき体制:
+  エンジニア 1名 — 確認・承認のみ
+  CS担当者  1名 — リレーのみ
+  PIECE     — それ以外の全て
+
+この体制で1日50件を処理できること。
+```
+
+### 10.2 エンジニア1名で回すための設計
+
+**問題:** 全件5分レビューだと50件で4時間。1名では持たない。
+
+**解決:** 確信度で分流し、HIGHは30秒、MEDIUM/LOWだけ5分。
+
+```
+確信度HIGH（全FC通過、矛盾ゼロ）:
+  → 「クイック承認」キュー
+  → エンジニアの操作: 回答をサッと読む → ワンクリック承認
+  → 所要: 30秒/件
+
+確信度MEDIUM（一部未検証あり）:
+  → 「確認必要」キュー
+  → エンジニアの操作: 確認ポイント(黄色)だけチェック → 承認 or 修正
+  → 所要: 3分/件
+
+確信度LOW（推測多い、根拠不足）:
+  → 「要調査」キュー
+  → エンジニアの操作: 独自調査が必要 → 修正して承認
+  → 所要: 10分/件
+```
+
+```
+50件/日の想定分布:
+  HIGH:   35件 × 30秒 = 17分
+  MEDIUM: 12件 × 3分  = 36分
+  LOW:    3件  × 10分 = 30分
+  合計: 83分（約1.5時間）
+
+→ エンジニア1名で余裕で回る。残りの時間は開発に使える。
+```
+
+#### エンジニアのレビュー画面（高速版）
+
+```
+┌────────────────────────────────────────────────────────┐
+│ レビューダッシュボード                    [田中エンジニア] │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│ [クイック承認: 8件🟢]  [確認必要: 3件🟡]  [要調査: 1件🔴] │
+│                                                        │
+│ ─── クイック承認（確信度HIGH） ─────────────────────── │
+│                                                        │
+│ #1050 ログインできない          確信度:HIGH FC:5/5     │
+│ 結論: アカウントロック(5回失敗)  ← 1行で見える          │
+│ [✅ 承認]  [📄 詳細を見る]                             │
+│                                                        │
+│ #1049 画面が白い                確信度:HIGH FC:3/3     │
+│ 結論: JSバンドルの読み込みエラー                        │
+│ [✅ 承認]  [📄 詳細を見る]                             │
+│                                                        │
+│ #1048 CSVインポートがエラー      確信度:HIGH FC:4/4     │
+│ 結論: 文字コードUTF-8が必要                            │
+│ [✅ 承認]  [📄 詳細を見る]                             │
+│                                                        │
+│ [🚀 8件まとめて承認]  ← HIGH全件をワンクリック         │
+│                                                        │
+│ ─── 確認必要（確信度MEDIUM） ───────────────────────── │
+│                                                        │
+│ #1047 APIがタイムアウト         確信度:MEDIUM FC:2/3   │
+│ 🟡 未検証: 「DBコネクションプールの枯渇が原因」        │
+│    → サーバーのコネクション数を確認してください         │
+│ [✅ 承認]  [✏️ 修正]  [🔍 追加調査を依頼]             │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
+
+**ポイント:**
+- HIGHは結論1行 + ワンクリック承認。詳細を見る必要すらない
+- まとめて承認ボタンでHIGH全件を一括処理
+- MEDIUMは「ここだけ確認」が黄色でハイライト
+- LOWは具体的な調査指示付き
+
+#### 将来: 確信度HIGHの自動承認
+
+```python
+# piece/usecases/auto_approve.py
+
+class AutoApproveUseCase:
+    """
+    確信度HIGH + 条件を全て満たす案件を自動承認する。
+
+    条件:
+      1. 全ファクトチェックがconfirmed
+      2. 矛盾ゼロ
+      3. セキュリティゲート通過
+      4. 類似の過去案件が3件以上承認済み
+      5. 自動承認フラグがON（管理者設定）
+    """
+
+    async def evaluate(self, ticket_id: str) -> AutoApproveResult:
+        response = await self.knowledge.get_response(ticket_id)
+
+        conditions = [
+            response.overall_confidence == Confidence.HIGH,
+            all(fc.status == "confirmed" for fc in response.fact_checks),
+            response.gate_summary.get("security") == "pass",
+            await self._has_similar_approved(response, min_count=3),
+            await self._is_auto_approve_enabled(),
+        ]
+
+        if all(conditions):
+            return AutoApproveResult(approved=True, reason="全条件クリア")
+
+        return AutoApproveResult(
+            approved=False,
+            reason=self._explain_failure(conditions),
+        )
+```
+
+### 10.3 CS1名で回すための設計
+
+**問題:** 50件×10分 = 8時間超。ギリギリ。
+
+**解決:** 3段階で自動化を進めて、CS1名の負荷を下げる。
+
+```
+Stage 1（MVP）: 手動リレー
+  CS: メール読む → チケット作成 → ヒアリング質問をコピペ → 回答をコピペ
+  所要: 10分/件 × 50件 = 8時間（ギリギリ）
+
+Stage 2（半自動）: メール自動取込 + ワンクリック送信
+  自動: メール受信 → チケット自動作成（件名・本文・顧客情報を自動抽出）
+  CS: ヒアリング質問の確認 → ワンクリックでメール送信
+  CS: 回答の確認 → ワンクリックでメール送信
+  所要: 3分/件 × 50件 = 2.5時間
+
+Stage 3（ほぼ全自動）: CS確認不要
+  自動: メール受信 → チケット作成 → ヒアリング質問を自動送信
+  自動: エンジニア承認 → 回答メールを自動送信
+  CS: 例外対応のみ（自動処理できなかった案件、クレーム等）
+  所要: 5分 × 5件（例外のみ） = 25分
+```
+
+#### Stage 2: メール自動取込の設計
+
+```python
+# piece/adapters/email/inbound.py
+
+class InboundEmailProcessor:
+    """
+    受信メールからチケットを自動作成する。
+
+    対応メールサービス:
+      - Gmail API（Webhookで受信通知）
+      - SendGrid Inbound Parse
+      - AWS SES + S3 + Lambda
+    """
+
+    async def process(self, raw_email: InboundEmail) -> Ticket | None:
+        # 1. 既存チケットへの返信か？
+        ticket_id = self._extract_ticket_id(raw_email.subject)
+        if ticket_id:
+            # 既存チケットにメッセージ追加
+            await self.ticket_service.add_message(
+                ticket_id=ticket_id,
+                role="customer",
+                content=raw_email.body_text,
+            )
+            return None
+
+        # 2. 新規問い合わせ
+        # 顧客情報を自動特定
+        customer = await self._find_or_create_customer(raw_email.from_address)
+
+        # チケット自動作成
+        ticket = await self.ticket_service.create(
+            customer_id=customer.id,
+            subject=raw_email.subject,
+            initial_message=raw_email.body_text,
+            source="email",
+            metadata={
+                "email_id": raw_email.message_id,
+                "attachments": raw_email.attachment_urls,
+            },
+        )
+
+        # CS担当者に通知
+        await self.notification.notify(
+            recipient=await self._get_on_duty_support(),
+            event=TicketEvent(type="new_ticket_auto", ticket_id=ticket.id, ...),
+        )
+
+        return ticket
+```
+
+#### Stage 2: ワンクリック送信の設計
+
+```python
+# piece/api/routes/tickets.py
+
+@router.post("/api/tickets/{id}/send-hearing-email")
+async def send_hearing_email(
+    id: str,
+    auth: AuthContext = Depends(require_role(Role.SUPPORT)),
+) -> SendResult:
+    """
+    CS担当者がワンクリックでヒアリング質問メールを送信。
+
+    PIECEが生成した質問文 → メール化 → 送信 → ステータス更新
+    """
+    ticket = await ticket_service.get(id)
+    hearing_question = await hearing_service.get_current_question(id)
+
+    email = EmailDraft(
+        to=ticket.customer_email,
+        subject=f"Re: {ticket.subject} [#{ticket.id[:8]}]",
+        body=hearing_question.to_customer_email(),
+    )
+
+    await email_service.send(email)
+    await ticket_service.update_status(id, "waiting_customer")
+
+    return SendResult(sent=True)
+
+
+@router.post("/api/tickets/{id}/send-response-email")
+async def send_response_email(
+    id: str,
+    auth: AuthContext = Depends(require_role(Role.SUPPORT)),
+) -> SendResult:
+    """
+    CS担当者がワンクリックで回答メールを送信。
+
+    エンジニア承認済みの回答文 → メール化 → 送信 → ステータス更新
+    """
+    ticket = await ticket_service.get(id)
+    customer_response = await response_service.get_customer_response(id)
+
+    email = EmailDraft(
+        to=ticket.customer_email,
+        subject=f"Re: {ticket.subject} [#{ticket.id[:8]}]",
+        body=customer_response.to_email_text(),
+    )
+
+    await email_service.send(email)
+    await ticket_service.update_status(id, "sent")
+
+    return SendResult(sent=True)
+```
+
+#### CS担当者のダッシュボード（1名体制最適化版）
+
+```
+┌────────────────────────────────────────────────────────┐
+│ サポートダッシュボード                      [山田] 本日 │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│ 今日の状況: 処理済み 32件 / 残り 18件 / 目標 50件      │
+│ ████████████████████░░░░░░░░ 64%                       │
+│                                                        │
+│ [🔴送信待ち: 5件]  [🟡対応中: 8件]  [⚪返信待ち: 5件]  │
+│                                                        │
+│ ─── やること（優先順） ───────────────────────────────│
+│                                                        │
+│ 1. 🔴 #1050 回答準備完了 → [📩 ワンクリック送信]       │
+│ 2. 🔴 #1049 回答準備完了 → [📩 ワンクリック送信]       │
+│ 3. 🔴 #1048 回答準備完了 → [📩 ワンクリック送信]       │
+│ 4. 🟡 #1053 ヒアリング質問あり → [📩 質問を送信]       │
+│ 5. 🟡 #1052 ヒアリング質問あり → [📩 質問を送信]       │
+│                                                        │
+│ [🚀 送信待ち5件を一括送信]                              │
+│                                                        │
+│ ─── 自動処理済み（確認不要） ──────────────────────── │
+│ ✅ #1055 メール自動取込 → チケット作成済み              │
+│ ✅ #1054 メール自動取込 → チケット作成済み              │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
+
+**ポイント:**
+- 「やること」が優先順位付きリスト。上から順にクリックするだけ
+- 送信待ちは一括送信可能
+- 自動取込はCSの操作不要（確認表示のみ）
+- 進捗バーで1日の処理状況が見える
+
+### 10.4 1名+1名体制で破綻するケース
+
+```
+ケース1: エンジニアが休み
+  対策: 確信度HIGHの自動承認を有効化
+        MEDIUM/LOWは翌日対応（SLA延長通知を自動送信）
+
+ケース2: CS担当者が休み
+  対策: Stage 2以降なら問題なし（メール自動取込 + 自動送信）
+        Stage 1では代理が必要
+
+ケース3: 1日100件に急増
+  対策: 確信度HIGHの自動承認 + 自動送信で人間の負荷を一定に保つ
+        人間が対応するのはMEDIUM/LOWのみ
+
+ケース4: 複雑な調査が必要な案件
+  対策: PIECEの確信度LOWで検出 → エンジニアに調査依頼
+        この場合、エンジニアの調査時間は「元々必要だった時間」
+        PIECEがなくても同じ時間がかかる。差し引きゼロ
+
+ケース5: 顧客がクレーム
+  対策: クレーム検出（感情分析） → 自動エスカレーション → 管理者通知
+        CS担当者は対応せず、管理者が直接対応
+```
+
+### 10.5 KPI（1名+1名体制の成功指標）
+
+```
+エンジニア:
+  レビュー時間: 平均2分/件以下（HIGH: 30秒、MEDIUM: 3分、LOW: 10分）
+  1日のレビュー合計: 2時間以内
+  承認率: 90%以上（修正が必要なのは10%以下）
+  自動承認率: 将来70%以上（人間レビュー不要）
+
+CS担当者:
+  1件あたり操作時間: Stage1=10分、Stage2=3分、Stage3=0分
+  1日の操作合計: Stage1=8時間、Stage2=2.5時間、Stage3=25分
+  自動取込率: Stage2以降80%以上
+
+システム:
+  回答精度: ベンチマーク80点以上を維持
+  ファクトチェック通過率: 90%以上
+  平均応答時間（受付→送信）: 4時間以内
+  顧客満足度: 4.0/5.0以上
+```
+
+### 10.6 データモデル追加
+
+```sql
+-- 自動承認設定
+CREATE TABLE auto_approve_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    enabled BOOLEAN DEFAULT false,
+    min_confidence TEXT DEFAULT 'high',
+    min_similar_approved INTEGER DEFAULT 3,
+    require_all_fc_confirmed BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- メール取込設定
+CREATE TABLE email_integration (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    provider TEXT NOT NULL CHECK (provider IN ('gmail', 'sendgrid', 'ses')),
+    config JSONB NOT NULL,          -- プロバイダ固有の設定
+    auto_create_ticket BOOLEAN DEFAULT true,
+    auto_send_hearing BOOLEAN DEFAULT false,   -- Stage 3
+    auto_send_response BOOLEAN DEFAULT false,  -- Stage 3
+    enabled BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- チケットに自動承認フラグ追加
+ALTER TABLE tickets
+    ADD COLUMN auto_approved BOOLEAN DEFAULT false,
+    ADD COLUMN auto_approve_reason TEXT;
+```
+
+---
+
+## 11. チェックリスト: 設計の穴
 
 | # | 項目 | 状態 | 設計書 |
 |---|------|------|--------|

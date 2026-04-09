@@ -34,7 +34,86 @@
 
 ## 2. 設計思想
 
-### 2.1 知識の3状態
+### 2.1 無知の知 — ソクラテスの原理
+
+このエンジンの哲学的基盤は「無知の知」。
+**自分が何を知らないかを知っている者が、最も賢い。**
+
+```
+知識には4つの状態がある:
+
+  1. Known Known（知っていて、正しい）
+     → 知識DBの高confidence + 検証済みノード
+     → システムの価値の源泉
+
+  2. Known Unknown（知らないと知っている）
+     → Mystery、Frontier
+     → 正直に「わかりません」と言える
+     → 調査すれば埋められる。健全な状態
+
+  3. Unknown Unknown（知らないことすら知らない）
+     → まだ発見されていない穴
+     → Curiosity Engineが発見する
+     → 発見された瞬間、2のKnown Unknownになる
+
+  4. False Known（知っていると思い込んでいるが間違い）★最も危険★
+     → 矛盾する知識、古くなった知識、根拠のない推測
+     → システムが「自信満々に嘘をつく」原因
+     → 発見が最も難しく、被害が最も大きい
+```
+
+**4番目のFalse Knownが最も危険。**
+
+なぜなら:
+- Unknown Unknownは「わからない」と答えれば被害はない
+- Known Unknownは「調査中」と答えれば被害はない
+- **False Knownは「間違った答えを自信満々に返す」**
+- 顧客がそれを信じて行動すると、被害が拡大する
+
+Curiosity Engineの**最優先タスクは矛盾検出（False Knownの発見）**。
+知識の穴を埋めるよりも、**嘘を見つけて消す方が遥かに重要。**
+
+```
+優先順位:
+  1. False Known → 矛盾検出・解消（信頼性の維持）
+  2. Unknown Unknown → Frontier発見（知識の拡張）
+  3. Known Unknown → 調査・解決（知識の深化）
+  4. Known Known → 根拠強化（知識の強化）
+```
+
+### 2.2 False Knownの検出手法
+
+False Knownは「一見正しそうに見える」から検出が難しい。
+以下の5つのシグナルで炙り出す。
+
+```
+シグナル1: 矛盾
+  同じ対象について、2つのノードが異なる主張をしている
+  → 少なくとも片方はFalse Known
+  → 検出方法: contradicts リンク、embedding近接+内容対立
+
+シグナル2: 陳腐化
+  コードが変更されたのに、知識が更新されていない
+  → 古い知識がFalse Knownになっている可能性
+  → 検出方法: diff-watch（gitの変更 → 影響する知識ノードを特定）
+
+シグナル3: 根拠消失
+  知識のcitationが指すファイル・行が、もう存在しない
+  → 根拠が消えた知識は信頼できない
+  → 検出方法: 定期的にcitationのファイル・行の存在確認
+
+シグナル4: 推測マーカー
+  「おそらく」「可能性がある」「推測だが」等の不確実語を含むのに
+  confidenceが高い → 矛盾（推測なのに自信がある）
+  → 検出方法: テキスト解析 + confidence値のクロスチェック
+
+シグナル5: 孤立した高confidence
+  他のどの知識とも繋がっていないのにconfidenceが高い
+  → 相互検証されていない = 信頼性の根拠がない
+  → 検出方法: グラフ上の孤立ノード + confidence閾値
+```
+
+### 2.3 知識の3状態
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌───────────────┐
@@ -101,6 +180,9 @@ class KnowledgeFrontier:
     # 孤立した知識（他のどこにも繋がっていない）
     isolated_nodes: list[str]
 
+    # ★ False Known候補（最も危険 — 嘘を自信満々に返す原因）
+    false_known_suspects: list[FalseKnownSuspect]
+
 
 @dataclass
 class DanglingRef:
@@ -142,6 +224,19 @@ class ShallowNode:
     confidence: float
     citation_count: int        # 根拠の数
     reason: str                # なぜ浅いか
+
+@dataclass
+class FalseKnownSuspect:
+    """
+    False Knownの疑いがある知識。
+    「知っていると思い込んでいるが間違っている」可能性が高いノード。
+    最も危険 — 発見次第、最優先で検証する。
+    """
+    node_id: str
+    signal: str                # 検出シグナル（contradiction/stale/citation_lost/speculative/isolated_high_conf）
+    confidence: float          # ノードの現在のconfidence（高いほど危険）
+    reason: str                # なぜFalse Knownと疑われるか
+    severity: float            # 深刻度（0-1）。高confidenceのFalse Knownほど危険
 ```
 
 ### 3.2 Frontier Scanner
@@ -217,6 +312,101 @@ class FrontierScanner:
         知識グラフの孤島。
         """
         ...
+
+    async def _find_false_known_suspects(self, ks: KnowledgeStore) -> list[FalseKnownSuspect]:
+        """
+        ★ False Knownの疑いがあるノードを検出する。
+        最も危険な知識状態 — 自信満々に嘘をつく原因。
+
+        5つのシグナルで炙り出す:
+
+        1. 矛盾: 同じ対象について異なる主張をする2つのノード
+           → contradicts リンク + embedding近接で内容対立を検出
+
+        2. 陳腐化: gitで変更されたファイルを参照しているが知識が未更新
+           → diff-watch結果とcitationを突合
+
+        3. 根拠消失: citationが指すファイル・行がもう存在しない
+           → 全citationのファイル・行の存在確認
+
+        4. 推測マーカー: 「おそらく」「可能性」等を含むのにconfidence高
+           → テキスト中の不確実語 × confidence値のクロスチェック
+
+        5. 孤立した高confidence: 他のどの知識とも繋がらないのに自信満々
+           → グラフ上の孤立 + confidence > 0.7
+        """
+        suspects = []
+
+        # Signal 1: 矛盾
+        contradictions = await self._find_contradictions(ks)
+        for c in contradictions:
+            for node_id in [c.node_a_id, c.node_b_id]:
+                node = ks.get_node(node_id)
+                if node:
+                    suspects.append(FalseKnownSuspect(
+                        node_id=node_id,
+                        signal="contradiction",
+                        confidence=node.confidence,
+                        reason=f"矛盾する主張が存在: '{c.claim_a}' vs '{c.claim_b}'",
+                        severity=c.severity * node.confidence,  # 高confidenceの矛盾ほど危険
+                    ))
+
+        # Signal 2: 陳腐化
+        stale_nodes = await ks.get_stale_nodes()  # diff-watchでマーク済み
+        for node in stale_nodes:
+            suspects.append(FalseKnownSuspect(
+                node_id=node.id,
+                signal="stale",
+                confidence=node.confidence,
+                reason="参照先コードが変更されたが知識が未更新",
+                severity=node.confidence * 0.8,
+            ))
+
+        # Signal 3: 根拠消失
+        for node_id, citations in await ks.get_all_citations():
+            for cit in citations:
+                if not await file_line_exists(cit.file_path, cit.start_line):
+                    node = ks.get_node(node_id)
+                    if node:
+                        suspects.append(FalseKnownSuspect(
+                            node_id=node_id,
+                            signal="citation_lost",
+                            confidence=node.confidence,
+                            reason=f"根拠のファイル/行が消失: {cit.file_path}:{cit.start_line}",
+                            severity=node.confidence * 0.9,
+                        ))
+
+        # Signal 4: 推測マーカー + 高confidence
+        speculative_markers = ["おそらく", "可能性", "推測", "probably", "might", "possibly", "unclear"]
+        for node in await ks.get_high_confidence_nodes(threshold=0.7):
+            content_lower = node.content.lower()
+            for marker in speculative_markers:
+                if marker in content_lower:
+                    suspects.append(FalseKnownSuspect(
+                        node_id=node.id,
+                        signal="speculative",
+                        confidence=node.confidence,
+                        reason=f"推測語「{marker}」を含むのにconfidence={node.confidence:.2f}",
+                        severity=node.confidence * 0.6,
+                    ))
+                    break
+
+        # Signal 5: 孤立 + 高confidence
+        isolated = await self._find_isolated_nodes(ks)
+        for node_id in isolated:
+            node = ks.get_node(node_id)
+            if node and node.confidence > 0.7:
+                suspects.append(FalseKnownSuspect(
+                    node_id=node_id,
+                    signal="isolated_high_conf",
+                    confidence=node.confidence,
+                    reason="他の知識と繋がっていないのにconfidenceが高い。相互検証されていない",
+                    severity=node.confidence * 0.5,
+                ))
+
+        # 危険度でソート（高い順）
+        suspects.sort(key=lambda s: s.severity, reverse=True)
+        return suspects
 ```
 
 ---
@@ -247,7 +437,17 @@ class CuriosityPlanner:
 
         candidates: list[ExplorationTask] = []
 
-        # 矛盾は最優先（知識の信頼性に関わる）
+        # ★ False Known候補は絶対最優先（嘘を放置しない）
+        for suspect in frontier.false_known_suspects:
+            candidates.append(ExplorationTask(
+                target=suspect,
+                task_type="verify_false_known",
+                priority=0.95 + suspect.severity * 0.05,  # 0.95〜1.0（全タスク中最高）
+                description=f"False Known検証[{suspect.signal}]: confidence={suspect.confidence:.2f}, {suspect.reason}",
+                method="該当ノードの主張をコードと照合。間違っていればconfidence→0にしてcontradicts記録。正しければcitation補強",
+            ))
+
+        # 矛盾は次に優先（知識の信頼性に関わる）
         for contradiction in frontier.contradictions:
             candidates.append(ExplorationTask(
                 target=contradiction,
@@ -312,7 +512,10 @@ class CuriosityPlanner:
         return candidates
 
     def _score_contradiction(self, c: Contradiction) -> float:
-        """矛盾の優先度。矛盾は知識の信頼性を壊すので常に高い。"""
+        """
+        矛盾 = False Knownの最有力候補。常に最高優先度。
+        無知の知の原理: 嘘を見つけて消すことは、知識を増やすことより重要。
+        """
         return 0.9 + c.severity * 0.1  # 0.9〜1.0
 
     def _score_logic_gap(self, gap: LogicGap, queries: list[str]) -> float:
@@ -760,11 +963,16 @@ GET    /api/curiosity/loop/status     # ループ状態
 
 Explorerは6種類の好奇心で動く:
 
-| 好奇心の種類 | 駆動する問い | 探索の結果 |
-|---|---|---|
-| **矛盾解消** | 「AとBのどちらが正しい？」 | 正しい方を残し、間違いを修正 |
-| **因果補完** | 「AはなぜCに至る？中間のBは？」 | 因果チェーンの完成 |
-| **参照解決** | 「このXの詳細は？」 | 新しい知識ノード |
-| **網羅補完** | 「このマトリクスのここが空」 | MECEカバレッジ向上 |
-| **深堀り** | 「これは本当か？根拠は十分か？」 | citation追加、confidence向上 |
-| **接続** | 「この知識は何に関係する？」 | リンク作成、ネットワーク密度向上 |
+| 好奇心の種類 | 駆動する問い | 探索の結果 | 優先度 |
+|---|---|---|---|
+| **嘘狩り** | 「これは本当にそうか？思い込みではないか？」 | False Knownの排除、信頼性の回復 | **★最高** |
+| **矛盾解消** | 「AとBのどちらが正しい？」 | 正しい方を残し、間違いを修正 | 高 |
+| **因果補完** | 「AはなぜCに至る？中間のBは？」 | 因果チェーンの完成 | 高 |
+| **参照解決** | 「このXの詳細は？」 | 新しい知識ノード | 中 |
+| **網羅補完** | 「このマトリクスのここが空」 | MECEカバレッジ向上 | 中 |
+| **深堀り** | 「これは本当か？根拠は十分か？」 | citation追加、confidence向上 | 中 |
+| **接続** | 「この知識は何に関係する？」 | リンク作成、ネットワーク密度向上 | 低 |
+
+**嘘狩り（False Known検証）が最高優先度。**
+知識を増やすよりも、嘘を見つけて消す方が遥かに重要。
+「知らない」は無害だが、「間違って知っている」は有害。

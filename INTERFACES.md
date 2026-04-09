@@ -800,3 +800,646 @@ Specialist:「ログインエラーを調査する」
 | consistency | PIECE Brain | cross_source_contradiction | P1 |
 | temporal | PIECE Brain | timeline_verification | P2 |
 | state | PIECE Brain | state_assertion | P2 |
+
+---
+
+## 12. 検証機リモートデバッグ設計
+
+### 12.1 問題定義
+
+顧客の問い合わせ対応で「ステージング環境で再現→原因特定→修正確認」のサイクルを
+人間がSSH/ブラウザで手動で行っている。これをRPA+PIECEで自動化する。
+
+ただし検証機（リモートサーバー上のステージング環境）には**ローカルとは異なる制約**がある:
+
+```
+ローカルとの違い:
+  - 物理的に離れている（SSH/HTTPS経由でしかアクセスできない）
+  - 権限が制限されている（root不可、特定ポートのみ）
+  - 複数人が同じ環境を使っている（排他制御が必要）
+  - デプロイ済みのコードが動いている（ソースが手元にない場合がある）
+  - 本番に近い構成（DB、キャッシュ、外部連携が本番同等）
+```
+
+### 12.2 検証機で必要な操作
+
+```
+調査フェーズ:
+  1. リモートデバッガ接続    — ブレークポイント設定、変数検査、ステップ実行
+  2. リアルタイムログ監視    — 操作しながらログをリアルタイムで見る
+  3. 環境差分比較            — 本番 vs ステージングの設定・バージョン差分
+  4. プロセス状態確認        — 動いてるプロセス、ポート、接続状況
+
+再現フェーズ:
+  5. ブラウザ操作（リモート） — 検証機のURLに対してPlaywrightで操作
+  6. API直接呼び出し         — 検証機のAPIエンドポイントを叩く
+  7. DB状態セットアップ       — テストデータ投入、状態リセット
+
+検証フェーズ:
+  8. コード差し替え + 再起動  — ホットフィックス適用→動作確認
+  9. 自動回帰テスト          — 修正後に関連機能が壊れてないか
+  10. 証拠収集 + レポート     — 全証拠をまとめてチケットに添付
+```
+
+### 12.3 インターフェース設計
+
+既存の3インターフェース（Collector/Prober/Verifier）に**新しい実装を追加する形**で対応する。
+新しい抽象を増やさない。
+
+#### RemoteDebugger — Proberの拡張
+
+```python
+class RemoteDebugger(Prober):
+    """
+    検証機のリモートデバッガに接続して検査する。
+    Node.js (--inspect) / Python (debugpy) / Java (JDWP) 対応。
+    """
+
+    name = "remote_debugger"
+    capabilities = [
+        "breakpoint",          # ブレークポイント設定・解除
+        "inspect_variable",    # 変数値の検査
+        "evaluate_expression", # 式の評価
+        "call_stack",          # コールスタック取得
+        "step_execution",      # ステップ実行
+    ]
+    side_effects = SideEffectLevel.MINIMAL  # デバッガ接続 = プロセスに影響あり
+
+    async def probe(self, target: Target, action: ProbeAction) -> Evidence:
+        match action.what:
+            case "breakpoint":
+                return await self._set_breakpoint(
+                    target,
+                    file=action.params["file"],
+                    line=action.params["line"],
+                )
+            case "inspect_variable":
+                return await self._inspect_var(
+                    target,
+                    expression=action.params["expression"],
+                )
+            case "call_stack":
+                return await self._get_call_stack(target)
+            case "evaluate":
+                return await self._evaluate(
+                    target,
+                    expression=action.params["expression"],
+                )
+
+    async def _connect(self, target: Target) -> DebugSession:
+        """
+        デバッグプロトコルに接続する。
+
+        Node.js: Chrome DevTools Protocol (CDP) via WebSocket
+          ws://{host}:{debug_port}
+
+        Python: Debug Adapter Protocol (DAP) via debugpy
+          {host}:{debug_port}
+
+        接続にはSSHトンネルを使う（デバッグポートは通常外部に公開しない）
+        """
+        tunnel = await self._create_ssh_tunnel(
+            target,
+            remote_port=target.metadata["debug_port"],
+            local_port=self._find_free_port(),
+        )
+        protocol = target.metadata.get("debug_protocol", "cdp")
+        match protocol:
+            case "cdp":
+                return await CDPSession.connect(f"ws://localhost:{tunnel.local_port}")
+            case "dap":
+                return await DAPSession.connect("localhost", tunnel.local_port)
+
+    async def is_available(self, target: Target) -> bool:
+        """デバッグポートが開いているか確認"""
+        return "debug_port" in target.metadata
+```
+
+#### LiveLogStream — Collectorの拡張
+
+```python
+class LiveLogStream(Collector):
+    """
+    検証機のログをリアルタイムでストリーミングする。
+    操作と同時にログを見るための仕組み。
+    """
+
+    name = "live_log_stream"
+    capabilities = [
+        "realtime_tail",        # tail -f 相当のリアルタイム監視
+        "filtered_stream",      # フィルタ付きストリーム
+        "multi_source_merge",   # 複数ログソースの時系列マージ
+    ]
+
+    async def collect(self, target: Target, query: CollectorQuery) -> Evidence:
+        """ログを収集する（スナップショット版）"""
+        entries = []
+        async for entry in self._stream(target, query):
+            entries.append(entry)
+            if len(entries) >= query.limit:
+                break
+        return Evidence(
+            source=f"live_log:{target.name}:{query.filters.get('path', '*')}",
+            summary=f"{len(entries)} log entries collected",
+            content=entries,
+            confidence=Confidence.HIGH,
+        )
+
+    async def stream(
+        self,
+        target: Target,
+        query: CollectorQuery,
+    ) -> AsyncIterator[LogEntry]:
+        """
+        ログをリアルタイムでyieldする（SSE/WebSocket向け）。
+
+        利用パターン:
+          1. RPA ブラウザ操作開始
+          2. 同時にlive_log_stream開始（別タスク）
+          3. 操作ごとにログエントリがリアルタイムで流れる
+          4. 操作完了後、収集したログをEvidenceとして返す
+        """
+        async with self._ssh_connect(target) as conn:
+            paths = query.filters.get("paths", ["/var/log/app/app.log"])
+            cmd = self._build_tail_command(paths, query.filters)
+
+            async with conn.create_process(cmd) as process:
+                async for line in process.stdout:
+                    entry = self.parser.parse_line(line)
+                    if self._matches_filter(entry, query.filters):
+                        yield entry
+
+    async def correlated_capture(
+        self,
+        target: Target,
+        log_query: CollectorQuery,
+        probe_action: ProbeAction,
+        prober: Prober,
+    ) -> CorrelatedEvidence:
+        """
+        操作とログを同時に実行し、相関付きの証拠を返す。
+
+        「このボタンを押したら、サーバーでこのログが出た」を証明する。
+        """
+        log_entries: list[LogEntry] = []
+        probe_result: Evidence | None = None
+
+        async def capture_logs():
+            async for entry in self.stream(target, log_query):
+                log_entries.append(entry)
+
+        async def run_probe():
+            nonlocal probe_result
+            probe_result = await prober.probe(target, probe_action)
+
+        # 並行実行: ログ監視 + 操作
+        log_task = asyncio.create_task(capture_logs())
+        await run_probe()
+
+        # 操作完了後、少し待ってからログ収集停止
+        await asyncio.sleep(2)
+        log_task.cancel()
+
+        return CorrelatedEvidence(
+            action=probe_result,
+            logs=log_entries,
+            correlation=self._find_correlations(probe_result, log_entries),
+        )
+
+
+@dataclass
+class CorrelatedEvidence:
+    """操作とログの相関付き証拠"""
+    action: Evidence         # 何をしたか（ブラウザ操作、API呼び出し等）
+    logs: list[LogEntry]     # その間に出たログ
+    correlation: list[Correlation]  # 操作とログの対応関係
+
+@dataclass
+class Correlation:
+    action_step: str         # 「ログインボタンをクリック」
+    action_timestamp: datetime
+    log_entry: LogEntry      # 「[ERROR] Invalid password for user@example.com」
+    log_timestamp: datetime
+    time_delta_ms: float     # 操作からログまでの時間差
+```
+
+#### EnvironmentComparator — Collectorの拡張
+
+```python
+class EnvironmentComparator(Collector):
+    """
+    複数環境（本番 vs ステージング vs ローカル）の差分を検出する。
+    「本番では動くのにステージングで動かない」の原因特定。
+    """
+
+    name = "env_comparator"
+    capabilities = [
+        "config_diff",          # 設定ファイルの差分
+        "version_diff",         # パッケージ/ランタイムバージョンの差分
+        "env_var_diff",         # 環境変数の差分（秘密値はマスク）
+        "schema_diff",          # DBスキーマの差分
+        "infra_diff",           # リソース（CPU/メモリ/ディスク）の差分
+    ]
+
+    async def collect(self, target: Target, query: CollectorQuery) -> Evidence:
+        match query.what:
+            case "config_diff":
+                return await self._diff_configs(target, query)
+            case "version_diff":
+                return await self._diff_versions(target, query)
+            case "env_var_diff":
+                return await self._diff_env_vars(target, query)
+            case "schema_diff":
+                return await self._diff_schemas(target, query)
+            case "full_diff":
+                return await self._full_comparison(target, query)
+
+    async def _full_comparison(
+        self, target: Target, query: CollectorQuery
+    ) -> Evidence:
+        """全項目を一括比較"""
+        compare_to = query.filters["compare_to"]  # 比較先の環境名
+        target_b = self._resolve_target(compare_to)
+
+        diffs = await asyncio.gather(
+            self._diff_configs(target, target_b),
+            self._diff_versions(target, target_b),
+            self._diff_env_vars(target, target_b),
+            self._diff_schemas(target, target_b),
+            self._diff_infra(target, target_b),
+        )
+
+        significant = [d for d in diffs if d.has_differences]
+
+        return Evidence(
+            source=f"env_compare:{target.name}↔{compare_to}",
+            summary=f"{len(significant)} significant differences found between {target.name} and {compare_to}",
+            content=EnvironmentDiff(
+                env_a=target.name,
+                env_b=compare_to,
+                diffs=diffs,
+                significant_count=len(significant),
+            ),
+            confidence=Confidence.HIGH,
+        )
+
+
+@dataclass
+class EnvironmentDiff:
+    env_a: str
+    env_b: str
+    diffs: list[DiffSection]
+    significant_count: int
+
+@dataclass
+class DiffSection:
+    category: str              # "config" | "version" | "env_var" | "schema" | "infra"
+    has_differences: bool
+    items: list[DiffItem]
+
+@dataclass
+class DiffItem:
+    key: str                   # 例: "NODE_ENV", "postgres_version", "max_connections"
+    value_a: str | None        # 環境Aの値
+    value_b: str | None        # 環境Bの値
+    severity: str              # "critical" | "warning" | "info"
+    masked: bool = False       # 秘密値はマスクされている
+```
+
+#### HotfixDeployer — Proberの拡張
+
+```python
+class HotfixDeployer(Prober):
+    """
+    検証機にホットフィックスを適用し、動作確認まで行う。
+    コード変更→再起動→自動テスト の一連をRPAで自動化。
+
+    ※本番には絶対に使わない。検証機専用。
+    """
+
+    name = "hotfix_deployer"
+    capabilities = [
+        "apply_patch",          # git patch適用
+        "restart_service",      # サービス再起動
+        "verify_after_deploy",  # 再起動後の動作確認
+        "rollback",             # 元に戻す
+    ]
+    side_effects = SideEffectLevel.MODERATE  # コード変更+再起動 → 要承認
+
+    async def probe(self, target: Target, action: ProbeAction) -> Evidence:
+        if action.require_approval:
+            # 承認チェック（Brain層から承認フラグが来ているか）
+            if not action.params.get("approved"):
+                return Evidence(
+                    source=f"hotfix:{target.name}",
+                    summary="承認待ち: 検証機へのホットフィックス適用",
+                    content={"status": "awaiting_approval", "patch": action.params["patch"]},
+                    confidence=Confidence.HIGH,
+                )
+
+        match action.what:
+            case "apply_and_verify":
+                return await self._apply_and_verify(target, action.params)
+            case "rollback":
+                return await self._rollback(target)
+
+    async def _apply_and_verify(
+        self, target: Target, params: dict
+    ) -> Evidence:
+        """パッチ適用→再起動→検証 の一連フロー"""
+        steps = []
+
+        # 1. 現在の状態を保存（ロールバック用）
+        snapshot = await self._create_snapshot(target)
+        steps.append(f"Snapshot created: {snapshot.id}")
+
+        # 2. パッチ適用
+        patch_result = await self._apply_patch(target, params["patch"])
+        steps.append(f"Patch applied: {patch_result.files_changed} files")
+
+        # 3. サービス再起動
+        restart_result = await self._restart_service(target, params.get("service"))
+        steps.append(f"Service restarted: {restart_result.status}")
+
+        # 4. ヘルスチェック待ち
+        health = await self._wait_for_healthy(target, timeout=60)
+        steps.append(f"Health check: {health.status}")
+
+        # 5. 自動検証（指定されていれば）
+        if "verification_scenario" in params:
+            verify_result = await self._run_verification(
+                target, params["verification_scenario"]
+            )
+            steps.append(f"Verification: {'PASS' if verify_result.passed else 'FAIL'}")
+
+            if not verify_result.passed:
+                # 検証失敗 → 自動ロールバック
+                await self._restore_snapshot(target, snapshot)
+                steps.append("Auto-rollback: restored to snapshot")
+
+        return Evidence(
+            source=f"hotfix:{target.name}",
+            summary=f"Hotfix {'applied and verified' if health.healthy else 'failed'}",
+            content={"steps": steps, "snapshot_id": snapshot.id},
+            confidence=Confidence.HIGH if health.healthy else Confidence.LOW,
+        )
+```
+
+#### RegressionRunner — Verifierの拡張
+
+```python
+class RegressionRunner(Verifier):
+    """
+    修正後に関連機能が壊れていないか自動検証する。
+    既存のProber（browser, api）を組み合わせて回帰テストを実行。
+    """
+
+    name = "regression"
+    verification_type = "regression_test"
+
+    async def verify(
+        self, claim: Claim, evidence: list[Evidence]
+    ) -> Verdict:
+        """
+        claim: 「この修正で問題が解決し、他に影響はない」
+        evidence: ホットフィックスの内容、影響範囲分析結果
+        """
+        # 1. 影響範囲から関連テストケースを特定
+        affected_areas = self._extract_affected_areas(evidence)
+        test_cases = self._select_test_cases(affected_areas)
+
+        # 2. 全テスト実行
+        results = []
+        for case in test_cases:
+            result = await self._run_test_case(case)
+            results.append(result)
+
+        passed = all(r.passed for r in results)
+        failed = [r for r in results if not r.passed]
+
+        if passed:
+            return Verdict(
+                status=VerdictStatus.CONFIRMED,
+                confidence=Confidence.HIGH,
+                reasoning=f"全{len(results)}件の回帰テストがパス",
+                supporting_evidence=[Evidence(
+                    source="regression_test",
+                    summary=f"{len(results)} tests passed",
+                    content=results,
+                    confidence=Confidence.HIGH,
+                )],
+            )
+        else:
+            return Verdict(
+                status=VerdictStatus.REFUTED,
+                confidence=Confidence.HIGH,
+                reasoning=f"{len(failed)}/{len(results)}件の回帰テストが失敗",
+                contradicting_evidence=[Evidence(
+                    source="regression_test",
+                    summary=f"{len(failed)} tests failed",
+                    content=failed,
+                    confidence=Confidence.HIGH,
+                )],
+            )
+
+    def _select_test_cases(
+        self, affected_areas: list[str]
+    ) -> list[TestCase]:
+        """
+        影響範囲に応じたテストケースを選択。
+
+        テストケースは3レベル:
+          smoke  — 主要機能が動くか（常に実行）
+          focused — 影響範囲の機能テスト（影響あるものだけ）
+          full   — 全機能テスト（時間があれば）
+        """
+        cases = self._load_smoke_tests()  # 常に実行
+
+        for area in affected_areas:
+            cases.extend(self._load_area_tests(area))
+
+        return cases
+```
+
+### 12.4 検証機ターゲット定義
+
+```yaml
+# rpa/config/targets.yaml
+
+targets:
+  staging:
+    name: ステージング環境
+    type: web_app
+    url: https://staging.example.com
+    credentials_ref: vault://staging/admin
+
+    # デバッグ設定
+    debug:
+      protocol: cdp                      # Chrome DevTools Protocol
+      port: 9229                         # Node.js --inspect ポート
+      ssh_tunnel: true                   # SSHトンネル経由で接続
+
+    # サービス管理
+    services:
+      backend:
+        type: docker                     # docker / pm2 / systemd
+        container: app-backend
+        restart_cmd: docker restart app-backend
+        health_endpoint: /api/health
+        health_timeout: 60
+      frontend:
+        type: pm2
+        process_name: next-app
+        restart_cmd: pm2 restart next-app
+        health_endpoint: /
+        health_timeout: 30
+
+    # ログ設定
+    logs:
+      structured:
+        type: supabase
+        project_ref: staging-xxx
+        api_key_ref: vault://supabase/staging_key
+      unstructured:
+        - type: docker
+          container: app-backend
+          format: json
+        - type: file
+          path: /var/log/nginx/error.log
+          format: nginx
+
+    # 環境比較用
+    compare_with:
+      - production                       # 本番との差分比較が可能
+
+    # 排他制御
+    lock:
+      type: redis                        # 同時使用防止
+      key: staging:investigation:lock
+      ttl: 3600                          # 最大1時間ロック
+
+    # 回帰テスト定義
+    regression:
+      smoke_tests: tests/smoke.yaml
+      area_tests_dir: tests/areas/
+```
+
+### 12.5 排他制御
+
+検証機は共有リソース。同時に複数のPIECE調査が走ると壊れる。
+
+```python
+class TargetLock:
+    """検証機の排他ロック"""
+
+    async def acquire(
+        self, target: Target, ticket_id: str, ttl: int = 3600
+    ) -> Lock | None:
+        """
+        ロック取得を試みる。
+        取得できなければNone（別の調査が使用中）。
+        """
+        lock_config = target.metadata.get("lock")
+        if not lock_config:
+            return Lock(acquired=True)  # ロック設定なし = 常に取得可能
+
+        match lock_config["type"]:
+            case "redis":
+                return await self._acquire_redis(lock_config, ticket_id, ttl)
+            case "file":
+                return await self._acquire_file(lock_config, ticket_id, ttl)
+
+    async def release(self, lock: Lock) -> None:
+        ...
+
+@dataclass
+class Lock:
+    acquired: bool
+    holder: str | None = None          # 誰が持っているか
+    acquired_at: datetime | None = None
+    expires_at: datetime | None = None
+```
+
+### 12.6 検証機デバッグの全体フロー
+
+```
+顧客:「ステージングでだけエラーが出る」
+  ↓
+① PIECE: 環境差分比較
+   env_comparator.collect(staging, {"what": "full_diff", "compare_to": "production"})
+   → 「staging: Node 20.11, production: Node 20.14。ENV_VAR 'FEATURE_X' がstagingにない」
+  ↓
+② PIECE: 検証機をロック
+   target_lock.acquire(staging, ticket_id)
+  ↓
+③ PIECE: ログ監視開始 + ブラウザ再現（相関キャプチャ）
+   live_log_stream.correlated_capture(
+     target=staging,
+     log_query={"paths": ["/var/log/app/app.log"], "level": "error"},
+     probe_action={"what": "navigate", "steps": [...]},
+     prober=browser_prober,
+   )
+   → 「ボタンクリック(T+0ms) → [ERROR] FeatureX is undefined(T+230ms)」
+  ↓
+④ PIECE: リモートデバッガで変数検査
+   remote_debugger.probe(staging, {
+     "what": "breakpoint", "file": "src/features/x.ts", "line": 42
+   })
+   → 「変数 featureConfig = undefined（環境変数未設定が原因）」
+  ↓
+⑤ PIECE: 原因特定 + 修正提案
+   「FEATURE_X環境変数がステージングに未設定。本番には設定されている。」
+   確信度: HIGH（環境差分 + ログ + デバッガ変数検査 の3点で裏付け）
+  ↓
+⑥ (オプション) ホットフィックス検証
+   hotfix_deployer.probe(staging, {
+     "what": "apply_and_verify",
+     "patch": "ENV FEATURE_X=true を .env に追加",
+     "verification_scenario": "login_and_use_feature_x",
+     "approved": true,
+   })
+   → 「修正適用 → 再起動 → 検証パス → 問題解消」
+  ↓
+⑦ PIECE: 回帰テスト
+   regression_runner.verify(
+     claim="修正で問題が解消し、他に影響はない",
+     evidence=[hotfix_result, impact_analysis],
+   )
+   → 「全12件の回帰テストパス」
+  ↓
+⑧ PIECE: ロック解除 + レポート
+   target_lock.release(lock)
+   → 全証拠をチケットに添付
+```
+
+### 12.7 更新されたインターフェース一覧
+
+#### 追加Collectors（+2種）
+
+| 名前 | 配置 | capabilities | 実装優先度 |
+|------|------|-------------|----------|
+| live_log_stream | RPA | realtime_tail, filtered_stream, multi_source_merge | **P0** |
+| env_comparator | RPA | config_diff, version_diff, env_var_diff, schema_diff | **P0** |
+
+#### 追加Probers（+2種）
+
+| 名前 | 配置 | capabilities | side_effects | 実装優先度 |
+|------|------|-------------|-------------|----------|
+| remote_debugger | RPA | breakpoint, inspect_variable, call_stack, evaluate | MINIMAL | P1 |
+| hotfix_deployer | RPA | apply_patch, restart_service, verify_after_deploy, rollback | **MODERATE** | P2 |
+
+#### 追加Verifiers（+1種）
+
+| 名前 | 配置 | verification_type | 実装優先度 |
+|------|------|-------------------|----------|
+| regression | RPA | regression_test | P1 |
+
+### 12.8 最終インターフェース総数
+
+```
+Collectors:  15種（既存13 + live_log_stream + env_comparator）
+Probers:      7種（既存5 + remote_debugger + hotfix_deployer）
+Verifiers:    6種（既存5 + regression）
+────────────
+合計:        28種の証拠収集・検査・検証手段
+```
